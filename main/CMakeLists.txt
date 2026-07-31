@@ -1,3 +1,22 @@
-idf_component_register(SRCS "rc_car_main.c"
-                       PRIV_REQUIRES esp_driver_gpio esp_driver_ledc esp_timer nvs_flash
-                       INCLUDE_DIRS "")
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "cli.c"
+        "config_store.c"
+        "esc_output.c"
+        "imu_sensor.c"
+        "powertrain_controller.c"
+        "rc_input.c"
+        "rpm_sensor.c"
+        "torque_vectoring.c"
+    PRIV_REQUIRES
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_ledc
+        esp_driver_pcnt
+        esp_timer
+        nvs_flash
+    INCLUDE_DIRS
+        "."
+        "include"
+)
