@@ -69,20 +69,18 @@ on GPIO33 unless the hardware architecture is deliberately changed again.
 
 | Wheel | Throttle | Reverse/direction |
 |---|---:|---:|
-| Front left | GPIO15 | GPIO2 |
-| Front right | GPIO13 | GPIO12 |
+| Front left | GPIO13 | GPIO2 |
+| Front right | GPIO14 | GPIO27 |
 | Rear left | GPIO21 | GPIO19 |
-| Rear right | GPIO27 | GPIO14 |
+| Rear right | GPIO18 | GPIO17 |
 
 All eight LEDC channels are currently consumed by these outputs. Keep the
 signals independent even when they carry equal commands, because per-wheel
 throttle control is required for torque vectoring.
 
-GPIO2, GPIO12, and GPIO15 are ESP32 boot-strapping pins. ESC inputs should be
-high impedance, but do not add pulls to these lines. If ESC-connected boot
-reliability is poor, preferred relocation candidates are GPIO16, GPIO17, and
-GPIO18. GPIO17 and GPIO18 are presently reserved for optional IMU interrupts
-but are not used by the firmware.
+GPIO2 is an ESP32 boot-strapping pin. Its ESC input should be high impedance,
+but do not add a pull to this line. If ESC-connected boot reliability is poor,
+relocate this signal to a non-strapping output.
 
 ### RPM Inputs
 
@@ -101,8 +99,8 @@ GPIO34 through GPIO39 are input-only and have no internal pull-ups.
 |---|---:|
 | I2C SDA | GPIO23 |
 | I2C SCL | GPIO22 |
-| INT1, reserved and unused | GPIO18 |
-| INT2, reserved and unused | GPIO17 |
+| INT1, unused | Not connected |
+| INT2, unused | Not connected |
 
 ## Electrical Assumptions And Wiring
 
@@ -528,6 +526,12 @@ Do not flash hardware unless the user explicitly requests it. The project has
 component or configuration changes can rebuild hundreds of ESP-IDF objects;
 subsequent incremental builds should be much faster.
 
+The `esp32_pin_map` build target validates `main/pin_config.h` and generates a
+self-contained `build/esp32_pin_map.svg`. It reads configuration and writes
+only into `build/`; it is not compiled into or flashed with the firmware. The
+standalone `tools/esp32_pin_map/open_pin_map.ps1` launcher regenerates and
+opens the same artifact without building firmware.
+
 The modular firmware was last confirmed to compile with ESP-IDF 6.0.1 for
 `esp32`. The last recorded application binary was about `0x34700` bytes with
 roughly 80 percent of the application partition free. Treat size figures as a
@@ -609,8 +613,8 @@ The following must remain visible until physically resolved:
 - CH1 steering tap, CH4 shutdown, and CH5 mode PWM calibrations need validation
   with the actual R7FG configuration.
 - Torque vectoring has compiled but has not been tuned or proven on the car.
-- Boot behavior with ESC inputs connected to GPIO2, GPIO12, and GPIO15 should
-  be watched because they are strapping pins.
+- Boot behavior with the ESC input connected to GPIO2 should be watched
+  because it is a strapping pin.
 - Exact ESC SKU and permitted traction-battery cell count must be confirmed
   before high-voltage operation.
 

@@ -56,17 +56,15 @@ Recommended CH5 three-position mapping:
 
 | Wheel | Throttle GPIO | Reverse GPIO |
 |---|---:|---:|
-| Front left | GPIO15 | GPIO2 |
-| Front right | GPIO13 | GPIO12 |
+| Front left | GPIO13 | GPIO2 |
+| Front right | GPIO14 | GPIO27 |
 | Rear left | GPIO21 | GPIO19 |
-| Rear right | GPIO27 | GPIO14 |
+| Rear right | GPIO18 | GPIO17 |
 
-GPIO2, GPIO12, and GPIO15 are ESP32 boot-strapping pins. The ESC signal
-inputs should be high impedance, but do not add external pull-ups or
-pull-downs to these lines. If boot reliability is poor with the ESCs
-connected, relocate these three signals to GPIO16, GPIO17, and GPIO18 and
-update `pin_config.h`. The currently unused IMU interrupt assignments can be
-released for that purpose.
+GPIO2 is an ESP32 boot-strapping pin. The ESC signal input should be high
+impedance, but do not add an external pull-up or pull-down to this line. If
+boot reliability is poor with the ESC connected, relocate this signal to a
+non-strapping output and update `pin_config.h`.
 
 ### RPM Inputs
 
@@ -85,8 +83,8 @@ GPIO34 through GPIO39 are input-only and have no internal pull-ups.
 |---|---:|
 | SDA | GPIO23 |
 | SCL | GPIO22 |
-| INT1, reserved but unused | GPIO18 |
-| INT2, reserved but unused | GPIO17 |
+| INT1, unused | Not connected |
+| INT2, unused | Not connected |
 
 The firmware polls the IMU over I2C at 200 Hz. Interrupt pins are not used
 in this version.

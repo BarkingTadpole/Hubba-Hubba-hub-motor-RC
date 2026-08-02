@@ -16,16 +16,16 @@
 #define PIN_RC_TV_MODE_INPUT GPIO_NUM_26
 
 /* Four independent ESC throttle outputs. */
-#define PIN_ESC_FL_THROTTLE GPIO_NUM_15
-#define PIN_ESC_FR_THROTTLE GPIO_NUM_13
+#define PIN_ESC_FL_THROTTLE GPIO_NUM_13
+#define PIN_ESC_FR_THROTTLE GPIO_NUM_14
 #define PIN_ESC_RL_THROTTLE GPIO_NUM_21
-#define PIN_ESC_RR_THROTTLE GPIO_NUM_27
+#define PIN_ESC_RR_THROTTLE GPIO_NUM_18
 
 /* Four independent ESC reverse/direction outputs. */
 #define PIN_ESC_FL_REVERSE GPIO_NUM_2
-#define PIN_ESC_FR_REVERSE GPIO_NUM_12
+#define PIN_ESC_FR_REVERSE GPIO_NUM_27
 #define PIN_ESC_RL_REVERSE GPIO_NUM_19
-#define PIN_ESC_RR_REVERSE GPIO_NUM_14
+#define PIN_ESC_RR_REVERSE GPIO_NUM_17
 
 /* Hobbywing HW86060041 RPM sensor signal inputs. */
 #define PIN_RPM_FL_INPUT GPIO_NUM_34
@@ -36,5 +36,5 @@
 /* Adafruit STEMMA QT ISM330DHCX I2C interface and optional interrupts. */
 #define PIN_IMU_I2C_SDA GPIO_NUM_23
 #define PIN_IMU_I2C_SCL GPIO_NUM_22
-#define PIN_IMU_INT1 GPIO_NUM_18
-#define PIN_IMU_INT2 GPIO_NUM_17
+#define PIN_IMU_INT1 GPIO_NUM_NC
+#define PIN_IMU_INT2 GPIO_NUM_NC

@@ -104,6 +104,14 @@ The first build after changing ESP-IDF components is long. Later builds are
 incremental. This project enables ESP-IDF's minimal-build option to avoid
 building unrelated framework components.
 
+Each build also validates `main/pin_config.h` and generates the self-contained
+USB-up wiring diagram at `build/esp32_pin_map.svg`. Generate and open only the
+diagram with:
+
+```powershell
+.\tools\esp32_pin_map\open_pin_map.ps1
+```
+
 See [the architecture document](docs/powertrain_architecture_v1.md) for the
 complete pin table, electrical notes, RPM conversion, safety behavior, and
 bench-test order.
