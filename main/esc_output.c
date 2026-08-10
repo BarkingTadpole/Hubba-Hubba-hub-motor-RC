@@ -41,21 +41,21 @@ static uint32_t pulse_us_to_duty(uint16_t pulse_us)
 static void set_pin(const pwm_pin_t *pin, uint16_t pulse_us)
 {
     uint32_t duty = pulse_us_to_duty(pulse_us);
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, pin->channel, duty));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, pin->channel));
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_HIGH_SPEED_MODE, pin->channel, duty));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_HIGH_SPEED_MODE, pin->channel));
 }
 
 static esp_err_t configure_pin(const pwm_pin_t *pin, uint16_t initial_pulse_us)
 {
     ledc_channel_config_t channel_config = {
         .gpio_num = pin->gpio,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
         .channel = pin->channel,
         .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = LEDC_TIMER_0,
         .duty = pulse_us_to_duty(initial_pulse_us),
         .hpoint = 0,
-        .sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE,
+        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
         .flags.output_invert = 0,
         .deconfigure = false,
     };
@@ -71,7 +71,7 @@ esp_err_t esc_output_init(const esc_limits_t *limits)
     configured_limits = *limits;
 
     ledc_timer_config_t timer_config = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
         .duty_resolution = LEDC_DUTY_RES,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = SERVO_FRAME_HZ,
@@ -115,10 +115,14 @@ void esc_output_set_wheels(const wheel_output_command_t *command)
     }
 
     for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
-        current_output.throttle_us[i] = command->throttle_us[i];
-        current_output.reverse_us[i] = command->reverse_us[i];
-        set_pin(&throttle_pins[i], command->throttle_us[i]);
-        set_pin(&reverse_pins[i], command->reverse_us[i]);
+        if (current_output.throttle_us[i] != command->throttle_us[i]) {
+            current_output.throttle_us[i] = command->throttle_us[i];
+            set_pin(&throttle_pins[i], command->throttle_us[i]);
+        }
+        if (current_output.reverse_us[i] != command->reverse_us[i]) {
+            current_output.reverse_us[i] = command->reverse_us[i];
+            set_pin(&reverse_pins[i], command->reverse_us[i]);
+        }
     }
 }
 

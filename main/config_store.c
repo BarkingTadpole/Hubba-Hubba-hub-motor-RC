@@ -3,22 +3,9 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include "default_config.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-
-#define DEFAULT_THROTTLE_US 1750
-#define DEFAULT_NEUTRAL_US 1250
-#define DEFAULT_REVERSE_US 1000
-#define DEFAULT_THROTTLE_DEADBAND_US 80
-#define DEFAULT_STEERING_LEFT_US 1000
-#define DEFAULT_STEERING_CENTER_US 1500
-#define DEFAULT_STEERING_RIGHT_US 2000
-#define DEFAULT_STEERING_DEADBAND_US 30
-#define DEFAULT_ARM_RUN_US 1000
-#define DEFAULT_ARM_STOP_US 2000
-#define DEFAULT_TV_OFF_US 1000
-#define DEFAULT_TV_STRAIGHT_US 1500
-#define DEFAULT_TV_FULL_US 2000
 
 static bool pulse_valid(uint16_t pulse_us)
 {
@@ -45,10 +32,10 @@ esp_err_t config_store_init(void)
 void config_store_load_throttle(throttle_calibration_t *calibration)
 {
     *calibration = (throttle_calibration_t){
-        .full_throttle_us = DEFAULT_THROTTLE_US,
-        .neutral_us = DEFAULT_NEUTRAL_US,
-        .full_reverse_us = DEFAULT_REVERSE_US,
-        .deadband_us = DEFAULT_THROTTLE_DEADBAND_US,
+        .full_throttle_us = DEFAULT_RC_THROTTLE_FULL_US,
+        .neutral_us = DEFAULT_RC_THROTTLE_NEUTRAL_US,
+        .full_reverse_us = DEFAULT_RC_THROTTLE_REVERSE_US,
+        .deadband_us = DEFAULT_RC_THROTTLE_DEADBAND_US,
     };
 
     nvs_handle_t nvs;
@@ -105,10 +92,10 @@ esp_err_t config_store_save_throttle(const throttle_calibration_t *calibration)
 void config_store_load_steering(steering_calibration_t *calibration)
 {
     *calibration = (steering_calibration_t){
-        .left_us = DEFAULT_STEERING_LEFT_US,
-        .center_us = DEFAULT_STEERING_CENTER_US,
-        .right_us = DEFAULT_STEERING_RIGHT_US,
-        .deadband_us = DEFAULT_STEERING_DEADBAND_US,
+        .left_us = DEFAULT_RC_STEERING_LEFT_US,
+        .center_us = DEFAULT_RC_STEERING_CENTER_US,
+        .right_us = DEFAULT_RC_STEERING_RIGHT_US,
+        .deadband_us = DEFAULT_RC_STEERING_DEADBAND_US,
     };
 
     nvs_handle_t nvs;
@@ -151,20 +138,26 @@ esp_err_t config_store_save_steering(const steering_calibration_t *calibration)
 void config_store_load_arm(arm_calibration_t *calibration)
 {
     *calibration = (arm_calibration_t){
-        .run_us = DEFAULT_ARM_RUN_US,
-        .stop_us = DEFAULT_ARM_STOP_US,
+        .run_us = DEFAULT_RC_ARM_RUN_US,
+        .stop_1_us = DEFAULT_RC_ARM_STOP_1_US,
+        .stop_2_us = DEFAULT_RC_ARM_STOP_2_US,
     };
 
     nvs_handle_t nvs;
     if (open_namespace("cal", NVS_READONLY, &nvs) != ESP_OK) return;
-    uint16_t run = 0, stop = 0;
+    uint16_t run = 0, stop_1 = 0, stop_2 = 0;
     esp_err_t err = nvs_get_u16(nvs, "arm_run", &run);
-    if (err == ESP_OK) err = nvs_get_u16(nvs, "arm_stop", &stop);
+    if (err == ESP_OK) err = nvs_get_u16(nvs, "arm_stop", &stop_1);
+    if (err == ESP_OK) err = nvs_get_u16(nvs, "arm_stop2", &stop_2);
     nvs_close(nvs);
-    if (err == ESP_OK && pulse_valid(run) && pulse_valid(stop) &&
-        abs((int32_t)run - (int32_t)stop) >= 250) {
+    if (err == ESP_OK && pulse_valid(run) && pulse_valid(stop_1) &&
+        pulse_valid(stop_2) &&
+        abs((int32_t)run - (int32_t)stop_1) >= 250 &&
+        abs((int32_t)run - (int32_t)stop_2) >= 250 &&
+        abs((int32_t)stop_1 - (int32_t)stop_2) >= 250) {
         calibration->run_us = run;
-        calibration->stop_us = stop;
+        calibration->stop_1_us = stop_1;
+        calibration->stop_2_us = stop_2;
         calibration->loaded_from_nvs = true;
     }
 }
@@ -175,7 +168,8 @@ esp_err_t config_store_save_arm(const arm_calibration_t *calibration)
     esp_err_t err = open_namespace("cal", NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
     err = nvs_set_u16(nvs, "arm_run", calibration->run_us);
-    if (err == ESP_OK) err = nvs_set_u16(nvs, "arm_stop", calibration->stop_us);
+    if (err == ESP_OK) err = nvs_set_u16(nvs, "arm_stop", calibration->stop_1_us);
+    if (err == ESP_OK) err = nvs_set_u16(nvs, "arm_stop2", calibration->stop_2_us);
     if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
@@ -184,9 +178,9 @@ esp_err_t config_store_save_arm(const arm_calibration_t *calibration)
 void config_store_load_tv_mode(tv_mode_calibration_t *calibration)
 {
     *calibration = (tv_mode_calibration_t){
-        .off_us = DEFAULT_TV_OFF_US,
-        .straight_us = DEFAULT_TV_STRAIGHT_US,
-        .full_us = DEFAULT_TV_FULL_US,
+        .off_us = DEFAULT_RC_TV_OFF_US,
+        .straight_us = DEFAULT_RC_TV_STRAIGHT_US,
+        .full_us = DEFAULT_RC_TV_FULL_US,
     };
 
     nvs_handle_t nvs;
@@ -234,8 +228,9 @@ void config_store_load_drive(drive_config_t *config)
 {
     *config = (drive_config_t){
         .reverse_limit_percent = 10,
-        .receiver_failsafe_us = 1565,
-        .receiver_failsafe_window_us = 10,
+        .receiver_failsafe_enabled = DEFAULT_RC_THROTTLE_FAILSAFE_ENABLED != 0,
+        .receiver_failsafe_us = DEFAULT_RC_THROTTLE_FAILSAFE_US,
+        .receiver_failsafe_window_us = DEFAULT_RC_THROTTLE_FAILSAFE_WINDOW_US,
         .motor_poles = 14,
         .torque_vectoring_enabled = false,
         .tv_authority_percent = 10,
@@ -258,6 +253,9 @@ void config_store_load_drive(drive_config_t *config)
 
     if (nvs_get_u8(nvs, "rev_limit", &u8) == ESP_OK && u8 <= 100) {
         config->reverse_limit_percent = u8; found = true;
+    }
+    if (nvs_get_u8(nvs, "fs_en", &u8) == ESP_OK && u8 <= 1) {
+        config->receiver_failsafe_enabled = u8 != 0; found = true;
     }
     if (nvs_get_u16(nvs, "fs_us", &u16) == ESP_OK && pulse_valid(u16)) {
         config->receiver_failsafe_us = u16; found = true;
@@ -304,6 +302,7 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     if (err != ESP_OK) return err;
 
     err = nvs_set_u8(nvs, "rev_limit", config->reverse_limit_percent);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "fs_en", config->receiver_failsafe_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_us", config->receiver_failsafe_us);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_window", config->receiver_failsafe_window_us);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "mtr_poles", config->motor_poles);

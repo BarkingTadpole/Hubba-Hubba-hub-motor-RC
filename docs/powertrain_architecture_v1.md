@@ -11,9 +11,9 @@ This firmware controls the powertrain of a 1/7 scale RC car:
 - Adafruit STEMMA QT ISM330DHCX IMU
 - 4x Hobbywing HW86060041 RPM sensors
 
-The steering servo remains connected directly to receiver CH1. The ESP32
-only observes a high-impedance copy of CH1 PWM. V1 does not generate servo
-commands.
+Receiver CH1 now enters the ESP32 on GPIO16. The firmware validates and
+relays that command to the steering servo from GPIO32. A missing CH1 signal
+or the configured transmitter-off throttle pulse centers the servo.
 
 With torque vectoring disabled, all four ESCs receive identical throttle and
 reverse commands. With torque vectoring active, reverse/direction remains
@@ -41,10 +41,16 @@ All assignments live in `main/pin_config.h`.
 
 | Function | R7FG channel | ESP32 GPIO |
 |---|---:|---:|
-| Steering observation | CH1 | GPIO32 |
+| Steering command | CH1 | GPIO16 |
 | Throttle | CH2 | GPIO25 |
 | Shutdown RUN/STOP | CH4 | GPIO33 |
 | Torque-vectoring mode | CH5 | GPIO26 |
+
+### Steering Servo Output
+
+| Function | ESP32 GPIO |
+|---|---:|
+| 50 Hz steering-servo PWM | GPIO32 |
 
 Recommended CH5 three-position mapping:
 
@@ -87,7 +93,11 @@ GPIO34 through GPIO39 are input-only and have no internal pull-ups.
 | INT2, unused | Not connected |
 
 The firmware polls the IMU over I2C at 200 Hz. Interrupt pins are not used
-in this version.
+in this version. `CONFIG_FREERTOS_HZ=1000` is required so the 5 ms sensor
+period converts to a nonzero FreeRTOS delay; the firmware also enforces this
+constraint at compile time. Both periodic tasks reset their schedule and
+block for at least one tick after a missed deadline so an overrun cannot turn
+into a watchdog-starving catch-up loop. `status` reports both overrun counts.
 
 ## 4. Electrical Wiring
 
@@ -97,28 +107,52 @@ Receiver ground, ESP32 ground, IMU ground, RPM sensor grounds, and all ESC
 signal grounds must be connected. Signal references are unreliable without
 this common ground.
 
-### Receiver and Steering Tap
+### Receiver and Steering Path
 
-Splicing the steering PWM signal is a good approach because the ESP32 input
-is high impedance and does not take control away from the servo. Make the
-splice as a Y connection:
+The servo signal is no longer connected directly to receiver CH1. Route the
+command through the ESP32:
 
 ```text
-R7FG CH1 signal ----+---- steering servo signal
-                    |
-                    +---- 3.3 V conditioning ---- GPIO32
+R7FG CH1 signal ---- 3.3 V conditioning ---- GPIO16
+GPIO32 -------------------------------------- steering servo signal
+BEC/receiver servo rail --------------------- steering servo power
+common ground ------------------------------- servo, receiver, and ESP32
 ```
 
-Do not connect servo power to an ESP32 GPIO. Condition every receiver PWM
-signal to a maximum of 3.3 V if the R7FG output is above 3.3 V. A resistor
-divider or a proper logic-level buffer is suitable. Verify pulse widths with
-`monitor steering`, not with a multimeter's DC voltage mode.
+Do not leave receiver CH1 connected to the servo signal after GPIO32 is
+connected; two driven PWM outputs must not be tied together. Do not connect
+servo power to an ESP32 GPIO. Condition every receiver PWM signal to a maximum
+of 3.3 V if the R7FG output is above 3.3 V. GPIO32 produces 3.3 V logic; verify
+that the servo accepts it, or use a proper 3.3 V-to-5 V logic buffer. Verify
+input and output pulse widths with `monitor steering` and an oscilloscope or
+signal tester, not with a multimeter's DC voltage mode.
+
+The servo starts at the saved steering center, follows valid CH1 commands at
+50 Hz, clamps commands to the calibrated left/right endpoints, and applies
+the steering deadband at center. Missing CH1 returns the servo to center. A
+matching CH2 transmitter-off pulse also centers it when the optional
+throttle-pulse detector is enabled. Either CH4 STOP/OFF position disables
+motor power but
+does not disable valid steering control.
 
 Use the R7FG in standard PWM mode with its integrated gyro disabled. The
 receiver gyro modifies steering before the ESP32 observes it and would add
 another feedback loop that conflicts with the ISM330DHCX-based controller.
 The [R7FG manual](https://radiolink.com.cn/r7fg_manual) describes its PWM and
 gyro modes.
+
+CH1, CH2, CH4, and CH5 pulse widths are measured with priority-3 GPIO edge
+interrupts installed on CPU0. The powertrain task is pinned to CPU1 and drives
+the eight ESC signals through the high-speed LEDC group. Steering uses the
+separate low-speed LEDC group. This separation reduces interference between
+receiver capture and output updates. Signal freshness expires after 100 ms
+without a completed valid pulse.
+
+Earlier MCPWM and RMT capture experiments are not approved for use. MCPWM
+allowed channels to become stale when throttle changed. The RMT version caused
+an unsafe forward/pause cycle, servo jolts, and ignored CH4 shutdown during a
+bench incident. The GPIO rollback must be validated with traction power
+disconnected before powered testing resumes.
 
 ### ESC Signals and BECs
 
@@ -157,8 +191,9 @@ and its linked manual cover the lead functions and voltage ranges.
 ### IMU
 
 Power the STEMMA QT board from ESP32 `3V3` and `GND`, then connect SDA and
-SCL. Mount it rigidly near the chassis centerline with its axes aligned to
-the car. Soft foam mounting adds delay and corrupts yaw-rate feedback. The
+SCL. Mount it rigidly near the chassis centerline. In the current mounting,
+sensor `+X` points toward the rear of the car and sensor `+Y` points toward
+the right. Soft foam mounting adds delay and corrupts yaw-rate feedback. The
 [Adafruit pinout guide](https://learn.adafruit.com/lsm6dsox-and-ism330dhc-6-dof-imu/pinouts)
 documents the board connections.
 
@@ -234,7 +269,7 @@ The firmware stores calibrations in ESP32 NVS.
 ```text
 cal receiver   neutral, full throttle, full reverse
 cal steering   center, full left, full right
-cal arm        CH4 STOP, then CH4 RUN
+cal arm        CH4 RUN/ON, STOP/OFF 1, then STOP/OFF 2
 cal tv         CH5 OFF, STRAIGHT, then FULL
 ```
 
@@ -243,53 +278,90 @@ Enter; the ESP32 averages 1.5 seconds of PWM measurements. Endpoints are
 identified by their captured values, so transmitter channel reversal is
 handled without hardcoded polarity.
 
-The currently measured throttle defaults remain:
+Compiled receiver defaults are centralized in `main/default_config.h`:
 
-- Full throttle: `1750 us`
-- Neutral: `1250 us`
-- Full reverse: `1000 us`
-- Neutral deadband: `80 us`
+| Control | Position | Default pulse |
+|---|---|---:|
+| Throttle | Neutral | `1514 us` |
+| Throttle | Full throttle | `978 us` |
+| Throttle | Full reverse | `2044 us` |
+| Steering | Center | `1518 us` |
+| Steering | Full left | `2050 us` |
+| Steering | Full right | `987 us` |
+| Torque vectoring | OFF | `2047 us` |
+| Torque vectoring | STRAIGHT | `1513 us` |
+| Torque vectoring | FULL | `981 us` |
+| Shutdown | RUN/ON | `983 us` |
+| Shutdown | STOP/OFF 1 | `2049 us` |
+| Shutdown | STOP/OFF 2 | `1515 us` |
+
+The default throttle deadband remains `80 us` and the steering deadband is
+`30 us`. Valid NVS calibration overrides these compiled values. Compiled
+defaults do not set `loaded_from_nvs`, so throttle and CH4 still require saved
+calibration before drive can arm.
 
 Drive arming requires saved throttle and CH4 calibrations. Steering and CH5
 calibration are required only before enabling torque vectoring.
 
 ## 8. Receiver Shutdown and Failsafe
 
-CH4 replaces the former physical GPIO switch.
+CH4 replaces the former physical GPIO switch. It is a three-position switch
+calibrated as one RUN/ON position and two STOP/OFF positions.
 
 Normal arming:
 
-1. Receiver is connected and CH4 is in STOP.
+1. Receiver is connected and CH4 is in either STOP/OFF position.
 2. Throttle is neutral.
-3. Move CH4 from STOP to RUN.
+3. Move CH4 from STOP/OFF to RUN/ON.
+4. Keep RUN/ON and neutral throttle valid continuously for 250 ms.
 
-The controller disarms when CH4 requests STOP or its PWM disappears. On
-boot, after signal loss, or after the configured throttle failsafe pulse, it
-requires a healthy STOP observation followed by RUN. The receiver's own
-failsafe STOP output cannot clear this lock while throttle is at the
-transmitter-off failsafe value. This prevents automatic re-arming when the
-transmitter reconnects.
+The 250 ms pre-arm qualification prevents a short receiver-wide PWM gap after
+a switch transition from occurring just after drive entry. Any invalid CH4 or
+throttle sample restarts the qualification timer. It does not change
+armed-state shutdown timing.
+
+The controller disarms immediately in either learned STOP/OFF position. CH4
+PWM loss disarms after the 100 ms receiver timeout. A pulse outside all three
+learned positions must persist for 60 ms before it disarms, preventing one
+malformed PWM frame from causing a false shutdown. On boot or after signal
+loss, a recognized STOP/OFF observation followed by RUN/ON is required. The
+same cycle is required after the optional throttle-pulse detector triggers.
+
+CH4 is processed by the ESP32 and therefore is not a hardware emergency stop.
+Testing must retain direct access to traction-power isolation. A final vehicle
+should have an independent physical means to remove ESC power or disable the
+ESCs even if the ESP32 is stalled.
+
+Each learned switch position has a `+/-125 us` recognition window. A pulse
+outside all three windows is unrecognized: after the 60 ms confirmation it
+disarms the drive and cannot satisfy the STOP/OFF observation required for
+rearming.
 
 Configure the R7FG failsafe so:
 
-- CH2 commands the known safe/failsafe pulse.
-- CH4 commands STOP.
+- CH1 commands steering center.
+- CH2 commands neutral throttle.
+- CH4 commands either learned STOP/OFF position.
 - CH5 commands OFF.
 
-The legacy measured CH2 transmitter-off value is `1565 us`. Configure its
-detection window with:
+The optional fixed throttle-pulse detector is disabled by default. The legacy
+measured CH2 transmitter-off value was `1565 us`; detecting that specific
+held pulse can be enabled with:
 
 ```text
 config failsafe 1565 10
 ```
 
-When that pulse is detected, safe ESC outputs are applied immediately and
+Disable the detector again with `config failsafe off`. When enabled and the
+configured pulse is detected, safe ESC outputs are applied immediately and
 the drive state disarms after a 60 ms confirmation. Complete PWM loss is
-declared after 100 ms.
+declared after 100 ms regardless of this setting. CH4 STOP/OFF, missing CH4,
+and unrecognized CH4 positions also remain active regardless of this setting.
 
 ## 9. Laptop ESC Calibration
 
-Use the ESP32 USB serial connection at `115200` baud. CH4 must remain STOP,
+Use the ESP32 USB serial connection at `115200` baud. CH4 must remain in a
+learned STOP/OFF position,
 throttle must remain neutral, the wheels must be lifted, and ESC traction
 power starts disconnected.
 
@@ -307,9 +379,9 @@ Any missing/non-STOP CH4 signal or a 30-second command timeout returns all
 outputs to safe values.
 
 `cal manual` is an alternate 30-second bench mode that directly relays CH2
-PWM to all four throttle outputs while holding reverse low. A throttle
-failsafe match, CH4 leaving STOP, signal loss, timeout, or `cal cancel`
-stops the relay.
+PWM to all four throttle outputs while holding reverse low. CH4 leaving STOP,
+signal loss, timeout, or `cal cancel` stops the relay. A configured throttle
+failsafe match also stops it when that detector is enabled.
 
 ## 10. Torque-Vectoring Controller
 
@@ -386,10 +458,13 @@ at low speed, starting with authority at 2 to 5 percent.
 
 - `app_main.c`: initializes and starts the application.
 - `cli.c`: parses USB serial commands.
+- `default_config.h`: owns compiled receiver defaults and the IMU mounting
+  reference.
 - `config_store.c`: owns defaults and NVS persistence.
-- `rc_input.c`: captures CH1, CH2, CH4, and CH5 PWM using GPIO edge
-  interrupts.
+- `rc_input.c`: captures CH1, CH2, CH4, and CH5 PWM with priority-3 GPIO edge
+  interrupts on CPU0.
 - `esc_output.c`: generates eight independent 50 Hz LEDC outputs.
+- `servo_output.c`: generates the independent 50 Hz GPIO32 steering output.
 - `rpm_sensor.c`: owns four hardware PCNT units and RPM conversion.
 - `imu_sensor.c`: configures and reads the ISM330DHCX over I2C.
 - `torque_vectoring.c`: contains the sensor controller and balanced wheel
@@ -400,18 +475,21 @@ at low speed, starting with authority at 2 to 5 percent.
 
 ## 12. Bench-Test Order
 
-1. Test with traction power disconnected and inspect all eight PWM outputs.
+1. Test with traction power disconnected and inspect all nine PWM outputs.
 2. Calibrate and monitor each receiver channel.
-3. Verify CH4 STOP disarms from every drive state.
-4. Turn the transmitter off and verify immediate safe outputs, then confirm
-   STOP-to-RUN is required after reconnection.
-5. Calibrate one ESC and motor first, then repeat for all four.
-6. Confirm wheel direction. Swap any two phase wires on an incorrect motor.
-7. Validate each RPM channel against an optical tachometer.
-8. Validate IMU yaw sign and stationary bias.
-9. Drive with torque vectoring disabled and verify equal output behavior.
-10. Enable straight assist at low authority and tune yaw response.
-11. Enable full assist only after straight behavior is stable.
+3. Verify the GPIO32 servo output follows CH1, respects both calibrated
+   endpoints, and centers when CH1 disappears.
+4. Verify both CH4 STOP/OFF positions disarm from every drive state while
+   steering remains responsive.
+5. Turn the transmitter off and verify safe ESC outputs and centered steering,
+   then confirm STOP/OFF-to-RUN/ON is required after reconnection.
+6. Calibrate one ESC and motor first, then repeat for all four.
+7. Confirm wheel direction. Swap any two phase wires on an incorrect motor.
+8. Validate each RPM channel against an optical tachometer.
+9. Validate IMU yaw sign and stationary bias.
+10. Drive with torque vectoring disabled and verify equal output behavior.
+11. Enable straight assist at low authority and tune yaw response.
+12. Enable full assist only after straight behavior is stable.
 
 Keep the wheels clear of the ground for every calibration and first-power
 test. Four independent motors can produce substantial force even at low

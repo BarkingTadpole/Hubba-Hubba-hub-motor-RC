@@ -102,12 +102,15 @@ static void handle_command(char *line)
         } else {
             powertrain_set_reverse_limit((uint8_t)percent);
         }
+    } else if (strcmp(line, "config failsafe off") == 0) {
+        powertrain_set_failsafe_enabled(false);
     } else if (strncmp(line, "config failsafe ", 16) == 0) {
         unsigned int pulse_us = 0;
         unsigned int window_us = 0;
         char extra = '\0';
         if (sscanf(line + 16, "%u %u %c", &pulse_us, &window_us, &extra) != 2) {
-            printf("ERR: usage is 'config failsafe <pulse_us> <window_us>'\n");
+            printf("ERR: usage is 'config failsafe off' or "
+                   "'config failsafe <pulse_us> <window_us>'\n");
         } else {
             powertrain_set_failsafe((uint16_t)pulse_us, (uint16_t)window_us);
         }

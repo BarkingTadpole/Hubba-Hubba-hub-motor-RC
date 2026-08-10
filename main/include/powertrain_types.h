@@ -56,7 +56,8 @@ typedef struct {
 
 typedef struct {
     uint16_t run_us;
-    uint16_t stop_us;
+    uint16_t stop_1_us;
+    uint16_t stop_2_us;
     bool loaded_from_nvs;
 } arm_calibration_t;
 
@@ -76,6 +77,7 @@ typedef struct {
 
 typedef struct {
     uint8_t reverse_limit_percent;
+    bool receiver_failsafe_enabled;
     uint16_t receiver_failsafe_us;
     uint16_t receiver_failsafe_window_us;
     uint8_t motor_poles;

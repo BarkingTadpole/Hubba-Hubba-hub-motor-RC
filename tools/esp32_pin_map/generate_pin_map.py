@@ -91,9 +91,10 @@ GPIO_LAYOUT = {
 
 SIGNAL_METADATA = {
     "PIN_RC_THROTTLE_INPUT": ("Receiver throttle (CH2)", "rc"),
-    "PIN_RC_STEERING_INPUT": ("Steering observation (CH1)", "rc"),
+    "PIN_RC_STEERING_INPUT": ("Steering command (CH1)", "rc"),
     "PIN_RC_ARM_INPUT": ("Shutdown RUN/STOP (CH4)", "rc"),
     "PIN_RC_TV_MODE_INPUT": ("Torque-vectoring mode (CH5)", "rc"),
+    "PIN_STEERING_SERVO_OUTPUT": ("Steering servo PWM", "servo"),
     "PIN_ESC_FL_THROTTLE": ("Front-left throttle", "throttle"),
     "PIN_ESC_FR_THROTTLE": ("Front-right throttle", "throttle"),
     "PIN_ESC_RL_THROTTLE": ("Rear-left throttle", "throttle"),
@@ -116,6 +117,7 @@ COLORS = {
     "reverse": "#cc710c",
     "rpm": "#267849",
     "imu": "#7055a3",
+    "servo": "#c79a0a",
     "other": "#59656b",
 }
 
@@ -191,7 +193,8 @@ def parse_assignments(config_path: Path) -> list[Assignment]:
                 "available on this DOIT DevKit header map"
             )
         if (
-            assignment.macro.startswith("PIN_ESC_")
+            (assignment.macro.startswith("PIN_ESC_") or
+             assignment.macro == "PIN_STEERING_SERVO_OUTPUT")
             and assignment.gpio in INPUT_ONLY_GPIOS
         ):
             raise PinMapError(
@@ -324,6 +327,7 @@ def generate_svg(
     <circle cx="292" cy="106" r="5" fill="{COLORS['reverse']}"/><text x="305" y="110">ESC reverse</text>
     <circle cx="411" cy="106" r="5" fill="{COLORS['rpm']}"/><text x="424" y="110">RPM</text>
     <circle cx="476" cy="106" r="5" fill="{COLORS['imu']}"/><text x="489" y="110">IMU</text>
+    <circle cx="554" cy="106" r="5" fill="{COLORS['servo']}"/><text x="567" y="110">Servo</text>
   </g>
 
   <rect class="rail" x="643" y="143" width="40" height="699"/>

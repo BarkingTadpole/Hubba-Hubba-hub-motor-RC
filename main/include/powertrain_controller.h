@@ -15,6 +15,7 @@ void powertrain_disarm(void);
 
 void powertrain_set_reverse_limit(uint8_t percent);
 void powertrain_set_failsafe(uint16_t pulse_us, uint16_t window_us);
+void powertrain_set_failsafe_enabled(bool enabled);
 void powertrain_set_motor_poles(uint8_t poles);
 void powertrain_set_tv_enabled(bool enabled);
 void powertrain_set_tv_authority(uint8_t percent);

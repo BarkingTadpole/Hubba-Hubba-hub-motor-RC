@@ -6,15 +6,19 @@
 #include <stdlib.h>
 
 #include "config_store.h"
+#include "default_config.h"
+#include "driver/gpio.h"
 #include "esc_output.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "imu_sensor.h"
+#include "pin_config.h"
 #include "powertrain_types.h"
 #include "rc_input.h"
 #include "rpm_sensor.h"
+#include "servo_output.h"
 #include "torque_vectoring.h"
 
 #define ESC_THROTTLE_MIN_US 1100
@@ -28,9 +32,14 @@
 #define DRIVE_ACCEL_STEP_US 12
 #define DRIVE_DECEL_STEP_US 100
 #define FAILSAFE_CONFIRM_US 60000
+#define ARM_UNRECOGNIZED_CONFIRM_US 60000
+#define ARM_RUN_STABLE_US 250000
 #define ESC_CAL_TIMEOUT_US 30000000
 #define MONITOR_DURATION_US 30000000
 #define MONITOR_INTERVAL_MS 250
+
+_Static_assert(pdMS_TO_TICKS(SENSOR_UPDATE_INTERVAL_MS) > 0,
+               "SENSOR_UPDATE_INTERVAL_MS must convert to at least one FreeRTOS tick");
 
 typedef struct {
     uint16_t throttle_us;
@@ -65,8 +74,12 @@ static drive_direction_t active_direction = DRIVE_DIRECTION_FORWARD;
 static drive_direction_t pending_direction = DRIVE_DIRECTION_FORWARD;
 static int64_t direction_hold_until_us;
 static bool arm_cycle_ready;
-static bool previous_arm_run;
+static int64_t arm_run_candidate_since_us;
+static int64_t arm_unrecognized_since_us;
+static uint16_t arm_unrecognized_pulse_us;
 static bool rpm_seen[POWERTRAIN_WHEEL_COUNT];
+static uint32_t sensor_overrun_count;
+static uint32_t powertrain_overrun_count;
 static torque_vectoring_state_t vectoring_state;
 static torque_vectoring_output_t vectoring_output;
 
@@ -105,6 +118,17 @@ static uint16_t ramp_toward(uint16_t current, uint16_t target, uint16_t step)
     return current;
 }
 
+static void wait_for_next_period(TickType_t *last_wake,
+                                 TickType_t period_ticks,
+                                 uint32_t *overrun_count)
+{
+    if (xTaskDelayUntil(last_wake, period_ticks) == pdFALSE) {
+        (*overrun_count)++;
+        *last_wake = xTaskGetTickCount();
+        vTaskDelay(1);
+    }
+}
+
 static uint16_t reverse_pulse_for_direction(drive_direction_t direction)
 {
     return direction == DRIVE_DIRECTION_REVERSE
@@ -139,6 +163,11 @@ static bool throttle_is_neutral(void)
 
 static bool throttle_matches_failsafe(void)
 {
+    if (!drive_config.receiver_failsafe_enabled) {
+        failsafe_candidate_since_us = 0;
+        return false;
+    }
+
     rc_channel_sample_t sample;
     if (!throttle_sample(&sample)) {
         failsafe_candidate_since_us = 0;
@@ -168,11 +197,71 @@ static bool throttle_failsafe_confirmed(void)
     return now_us - failsafe_candidate_since_us >= FAILSAFE_CONFIRM_US;
 }
 
-static bool arm_requests_run(uint16_t pulse_us)
+static void update_steering_servo(void)
+{
+    uint16_t target_us = steering_cal.center_us;
+    rc_channel_sample_t sample;
+
+    if (!throttle_matches_failsafe() &&
+        rc_input_get(RC_CHANNEL_STEERING, &sample)) {
+        uint16_t minimum_us = steering_cal.left_us < steering_cal.right_us
+                                  ? steering_cal.left_us
+                                  : steering_cal.right_us;
+        uint16_t maximum_us = steering_cal.left_us > steering_cal.right_us
+                                  ? steering_cal.left_us
+                                  : steering_cal.right_us;
+        int32_t center_delta = (int32_t)sample.pulse_us - steering_cal.center_us;
+
+        if (abs(center_delta) <= steering_cal.deadband_us) {
+            target_us = steering_cal.center_us;
+        } else if (sample.pulse_us < minimum_us) {
+            target_us = minimum_us;
+        } else if (sample.pulse_us > maximum_us) {
+            target_us = maximum_us;
+        } else {
+            target_us = sample.pulse_us;
+        }
+    }
+
+    servo_output_set_pulse(target_us);
+}
+
+typedef enum {
+    ARM_POSITION_UNKNOWN = 0,
+    ARM_POSITION_RUN,
+    ARM_POSITION_STOP_1,
+    ARM_POSITION_STOP_2,
+} arm_position_t;
+
+static arm_position_t arm_position(uint16_t pulse_us)
 {
     int run_distance = abs((int32_t)pulse_us - (int32_t)arm_cal.run_us);
-    int stop_distance = abs((int32_t)pulse_us - (int32_t)arm_cal.stop_us);
-    return run_distance < stop_distance;
+    int stop_1_distance = abs((int32_t)pulse_us - (int32_t)arm_cal.stop_1_us);
+    int stop_2_distance = abs((int32_t)pulse_us - (int32_t)arm_cal.stop_2_us);
+
+    if (stop_1_distance <= DEFAULT_RC_ARM_POSITION_WINDOW_US) return ARM_POSITION_STOP_1;
+    if (stop_2_distance <= DEFAULT_RC_ARM_POSITION_WINDOW_US) return ARM_POSITION_STOP_2;
+    if (run_distance <= DEFAULT_RC_ARM_POSITION_WINDOW_US) return ARM_POSITION_RUN;
+    return ARM_POSITION_UNKNOWN;
+}
+
+static const char *arm_position_name(uint16_t pulse_us)
+{
+    switch (arm_position(pulse_us)) {
+    case ARM_POSITION_RUN:
+        return "RUN";
+    case ARM_POSITION_STOP_1:
+        return "STOP 1";
+    case ARM_POSITION_STOP_2:
+        return "STOP 2";
+    default:
+        return "UNRECOGNIZED";
+    }
+}
+
+static bool arm_requests_run(uint16_t pulse_us)
+{
+    return arm_position(pulse_us) == ARM_POSITION_RUN;
 }
 
 static bool arm_channel_state(bool *run)
@@ -181,8 +270,22 @@ static bool arm_channel_state(bool *run)
     if (!rc_input_get(RC_CHANNEL_ARM, &sample)) {
         return false;
     }
-    *run = arm_requests_run(sample.pulse_us);
+    arm_position_t position = arm_position(sample.pulse_us);
+    if (position == ARM_POSITION_UNKNOWN) {
+        return false;
+    }
+    *run = position == ARM_POSITION_RUN;
     return true;
+}
+
+static uint32_t rc_sample_age_ms(const rc_channel_sample_t *sample, int64_t now_us)
+{
+    if (sample->updated_at_us <= 0 || now_us <= sample->updated_at_us) {
+        return 0;
+    }
+
+    int64_t age_ms = (now_us - sample->updated_at_us) / 1000;
+    return age_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)age_ms;
 }
 
 static bool shutdown_channel_is_safe(void)
@@ -245,6 +348,7 @@ static void reset_drive_state(void)
     pending_direction = DRIVE_DIRECTION_FORWARD;
     direction_hold_until_us = 0;
     failsafe_candidate_since_us = 0;
+    arm_run_candidate_since_us = 0;
     torque_vectoring_reset(&vectoring_state);
     vectoring_output = (torque_vectoring_output_t){
         .inactive_reason = "drive is disarmed",
@@ -284,7 +388,7 @@ static bool drive_arm_allowed(void)
         return false;
     }
     if (!arm_channel_state(&arm_run)) {
-        printf("ERR: receiver arm channel signal missing\n");
+        printf("ERR: receiver arm channel is missing or outside its calibrated positions\n");
         return false;
     }
     if (!arm_run) {
@@ -465,8 +569,27 @@ static void update_drive_outputs(void)
 
 static void handle_receiver_arm_control(void)
 {
-    bool arm_run = false;
-    bool arm_valid = arm_channel_state(&arm_run);
+    rc_channel_sample_t arm_sample = {0};
+    bool arm_signal_valid = rc_input_get(RC_CHANNEL_ARM, &arm_sample);
+    arm_position_t position = arm_signal_valid
+                                  ? arm_position(arm_sample.pulse_us)
+                                  : ARM_POSITION_UNKNOWN;
+    bool arm_unrecognized = arm_signal_valid && position == ARM_POSITION_UNKNOWN;
+    bool arm_unrecognized_confirmed = false;
+    int64_t now_us = esp_timer_get_time();
+
+    if (arm_unrecognized) {
+        if (arm_unrecognized_since_us == 0) {
+            arm_unrecognized_since_us = now_us;
+        }
+        arm_unrecognized_pulse_us = arm_sample.pulse_us;
+        arm_unrecognized_confirmed =
+            now_us - arm_unrecognized_since_us >= ARM_UNRECOGNIZED_CONFIRM_US;
+    } else {
+        arm_unrecognized_since_us = 0;
+    }
+
+    bool arm_run = position == ARM_POSITION_RUN;
     bool healthy_throttle = rc_input_is_valid(RC_CHANNEL_THROTTLE) &&
                             !throttle_matches_failsafe();
     bool esc_calibration_active = system_state == SYSTEM_ESC_CAL_ARMED ||
@@ -475,37 +598,77 @@ static void handle_receiver_arm_control(void)
                                   system_state == SYSTEM_ESC_CAL_MANUAL;
 
     if (esc_calibration_active && arm_cal.loaded_from_nvs &&
-        (!arm_valid || arm_run)) {
+        (!arm_signal_valid || arm_run || arm_unrecognized_confirmed)) {
         powertrain_cal_cancel();
         printf("\nWARN: ESC calibration stopped because the receiver shutdown "
                "channel is not in STOP\n> ");
         fflush(stdout);
-        previous_arm_run = arm_valid && arm_run;
+        arm_run_candidate_since_us = 0;
         return;
     }
 
-    if (!arm_valid) {
+    if (!arm_signal_valid) {
+        arm_run_candidate_since_us = 0;
         if (system_state == SYSTEM_DRIVE_ARMED) {
-            disarm_to_safe("WARN: receiver arm channel lost; drive disarmed", true);
+            rc_channel_sample_t throttle_sample = {0};
+            rc_channel_sample_t steering_sample = {0};
+            rc_channel_sample_t tv_sample = {0};
+            rc_input_get(RC_CHANNEL_THROTTLE, &throttle_sample);
+            rc_input_get(RC_CHANNEL_STEERING, &steering_sample);
+            rc_input_get(RC_CHANNEL_TV_MODE, &tv_sample);
+
+            char warning[256];
+            snprintf(warning, sizeof(warning),
+                     "WARN: receiver arm signal lost; CH4 last=%u us age=%lu ms "
+                     "level=%d, CH2 age=%lu ms, CH1 age=%lu ms, CH5 age=%lu ms; "
+                     "drive disarmed",
+                     arm_sample.pulse_us,
+                     (unsigned long)rc_sample_age_ms(&arm_sample, now_us),
+                     gpio_get_level(PIN_RC_ARM_INPUT),
+                     (unsigned long)rc_sample_age_ms(&throttle_sample, now_us),
+                     (unsigned long)rc_sample_age_ms(&steering_sample, now_us),
+                     (unsigned long)rc_sample_age_ms(&tv_sample, now_us));
+            disarm_to_safe(warning, true);
         }
-        previous_arm_run = false;
+        return;
+    }
+
+    if (arm_unrecognized) {
+        arm_run_candidate_since_us = 0;
+        if (arm_unrecognized_confirmed && system_state == SYSTEM_DRIVE_ARMED) {
+            char warning[192];
+            snprintf(warning, sizeof(warning),
+                     "WARN: receiver arm channel stayed unrecognized at %u us "
+                     "(RUN=%u, STOP1=%u, STOP2=%u); drive disarmed",
+                     arm_unrecognized_pulse_us, arm_cal.run_us,
+                     arm_cal.stop_1_us, arm_cal.stop_2_us);
+            disarm_to_safe(warning, true);
+        }
         return;
     }
 
     if (!arm_run) {
+        arm_run_candidate_since_us = 0;
         if (system_state == SYSTEM_DRIVE_ARMED) {
             disarm_to_safe("OK: receiver arm switch moved to STOP; drive disarmed", false);
         }
         if (healthy_throttle && !calibration_in_progress) {
             arm_cycle_ready = true;
         }
-    } else if (!previous_arm_run && arm_cycle_ready &&
+    } else if (arm_cycle_ready &&
                system_state == SYSTEM_DISARMED && !calibration_in_progress) {
-        if (drive_arm_allowed()) {
-            arm_drive();
+        if (!healthy_throttle || !throttle_is_neutral()) {
+            arm_run_candidate_since_us = 0;
+        } else if (arm_run_candidate_since_us == 0) {
+            arm_run_candidate_since_us = now_us;
+        } else if (now_us - arm_run_candidate_since_us >= ARM_RUN_STABLE_US) {
+            if (drive_arm_allowed()) {
+                arm_drive();
+            } else {
+                arm_run_candidate_since_us = now_us;
+            }
         }
     }
-    previous_arm_run = arm_run;
 }
 
 static bool calibration_allowed(bool require_neutral)
@@ -622,7 +785,7 @@ void powertrain_calibrate_steering(void)
 {
     if (!calibration_allowed(true)) return;
     calibration_in_progress = true;
-    printf("Steering calibration started. The steering PWM tap is read-only.\n");
+    printf("Steering calibration started. The servo continues following valid CH1 input.\n");
     uint16_t center = capture_channel(RC_CHANNEL_STEERING, "Hold steering centered.");
     uint16_t left = center ? capture_channel(RC_CHANNEL_STEERING, "Hold full left steering.") : 0;
     uint16_t right = left ? capture_channel(RC_CHANNEL_STEERING, "Hold full right steering.") : 0;
@@ -650,14 +813,22 @@ void powertrain_calibrate_arm(void)
 {
     if (!calibration_allowed(true)) return;
     calibration_in_progress = true;
-    printf("Receiver arm-channel calibration started.\n");
-    uint16_t stop = capture_channel(RC_CHANNEL_ARM, "Put the shutdown switch in STOP.");
-    uint16_t run = stop ? capture_channel(RC_CHANNEL_ARM, "Put the shutdown switch in RUN.") : 0;
+    printf("Receiver three-position shutdown calibration started.\n");
+    uint16_t run = capture_channel(RC_CHANNEL_ARM, "Put the shutdown switch in RUN/ON.");
+    uint16_t stop_1 = run ? capture_channel(RC_CHANNEL_ARM,
+                                            "Put the shutdown switch in the first STOP/OFF position.") : 0;
+    uint16_t stop_2 = stop_1 ? capture_channel(RC_CHANNEL_ARM,
+                                               "Put the shutdown switch in the second STOP/OFF position.") : 0;
 
-    if (stop && run && abs((int32_t)stop - (int32_t)run) >= 250) {
+    bool distinct = run && stop_1 && stop_2 &&
+                    abs((int32_t)run - (int32_t)stop_1) >= 250 &&
+                    abs((int32_t)run - (int32_t)stop_2) >= 250 &&
+                    abs((int32_t)stop_1 - (int32_t)stop_2) >= 250;
+    if (distinct) {
         arm_cal = (arm_calibration_t){
             .run_us = run,
-            .stop_us = stop,
+            .stop_1_us = stop_1,
+            .stop_2_us = stop_2,
             .loaded_from_nvs = true,
         };
         esp_err_t err = config_store_save_arm(&arm_cal);
@@ -665,8 +836,8 @@ void powertrain_calibrate_arm(void)
                    ? "OK: receiver arm-channel calibration saved\n"
                    : "ERR: failed to save arm calibration: %s\n",
                err == ESP_OK ? "" : esp_err_to_name(err));
-    } else if (stop && run) {
-        printf("ERR: RUN and STOP must differ by at least 250 us\n");
+    } else if (run && stop_1 && stop_2) {
+        printf("ERR: RUN, STOP 1, and STOP 2 must each differ by at least 250 us\n");
     }
     arm_cycle_ready = false;
     calibration_in_progress = false;
@@ -845,11 +1016,25 @@ void powertrain_set_failsafe(uint16_t pulse_us, uint16_t window_us)
     }
     drive_config.receiver_failsafe_us = pulse_us;
     drive_config.receiver_failsafe_window_us = window_us;
+    drive_config.receiver_failsafe_enabled = true;
     failsafe_candidate_since_us = 0;
     char message[96];
     snprintf(message, sizeof(message), "OK: throttle failsafe set to %u +/- %u us",
              pulse_us, window_us);
     save_drive_config_or_report(message);
+}
+
+void powertrain_set_failsafe_enabled(bool enabled)
+{
+    if (system_state != SYSTEM_DISARMED) {
+        printf("ERR: throttle-pulse failsafe can only be changed while DISARMED\n");
+        return;
+    }
+    drive_config.receiver_failsafe_enabled = enabled;
+    failsafe_candidate_since_us = 0;
+    save_drive_config_or_report(enabled
+                                    ? "OK: throttle-pulse failsafe enabled"
+                                    : "OK: throttle-pulse failsafe disabled");
 }
 
 void powertrain_set_motor_poles(uint8_t poles)
@@ -972,6 +1157,11 @@ void powertrain_print_status(void)
            state_name(system_state), arm_cycle_ready ? "ready" : "required");
     print_channel("throttle", RC_CHANNEL_THROTTLE);
     print_channel("steering", RC_CHANNEL_STEERING);
+    printf("  steering servo: GPIO%d, output=%u us\n",
+           PIN_STEERING_SERVO_OUTPUT, servo_output_get_pulse());
+    printf("  loop overruns: sensor=%lu powertrain=%lu\n",
+           (unsigned long)sensor_overrun_count,
+           (unsigned long)powertrain_overrun_count);
     print_channel("arm/stop", RC_CHANNEL_ARM);
     print_channel("TV CH5", RC_CHANNEL_TV_MODE);
     printf("  arm request: %s\n", arm_valid ? (arm_run ? "RUN" : "STOP") : "missing");
@@ -983,15 +1173,21 @@ void powertrain_print_status(void)
            steering_cal.left_us, steering_cal.center_us, steering_cal.right_us,
            steering_cal.deadband_us,
            steering_cal.loaded_from_nvs ? "nvs" : "defaults");
-    printf("  arm cal: run=%u stop=%u source=%s\n",
-           arm_cal.run_us, arm_cal.stop_us,
+    printf("  arm cal: run=%u stop1=%u stop2=%u source=%s\n",
+           arm_cal.run_us, arm_cal.stop_1_us, arm_cal.stop_2_us,
            arm_cal.loaded_from_nvs ? "nvs" : "defaults/unarmed");
     printf("  CH5 cal: off=%u straight=%u full=%u source=%s\n",
            tv_mode_cal.off_us, tv_mode_cal.straight_us, tv_mode_cal.full_us,
            tv_mode_cal.loaded_from_nvs ? "nvs" : "defaults");
-    printf("  drive: reverse_limit=%u%%, failsafe=%u +/- %u us, motor=%u poles\n",
-           drive_config.reverse_limit_percent, drive_config.receiver_failsafe_us,
-           drive_config.receiver_failsafe_window_us, drive_config.motor_poles);
+    printf("  drive: reverse_limit=%u%%, motor=%u poles\n",
+           drive_config.reverse_limit_percent, drive_config.motor_poles);
+    if (drive_config.receiver_failsafe_enabled) {
+        printf("  throttle-pulse failsafe: %u +/- %u us\n",
+               drive_config.receiver_failsafe_us,
+               drive_config.receiver_failsafe_window_us);
+    } else {
+        printf("  throttle-pulse failsafe: disabled\n");
+    }
     printf("  TV: configured=%s, CH5=%s, active=%s, authority=+/- %u%%, reason=%s\n",
            drive_config.torque_vectoring_enabled ? "enabled" : "disabled",
            tv_mode_name(requested_tv_mode()),
@@ -1002,6 +1198,9 @@ void powertrain_print_status(void)
            imu.valid ? "valid" : "unavailable",
            imu.bias_calibrated ? "calibrated" : "not calibrated",
            imu.yaw_rate_dps);
+    printf("  IMU mount: +X=%s, +Y=%s\n",
+           IMU_MOUNT_X_POSITIVE_DIRECTION,
+           IMU_MOUNT_Y_POSITIVE_DIRECTION);
     printf("  RPM: FL=%.0f%s FR=%.0f%s RL=%.0f%s RR=%.0f%s\n",
            rpm.rpm[0], rpm.valid[0] ? "" : "?",
            rpm.rpm[1], rpm.valid[1] ? "" : "?",
@@ -1044,10 +1243,11 @@ void powertrain_monitor_steering(void)
     while (esp_timer_get_time() < end_at_us) {
         rc_channel_sample_t sample;
         if (rc_input_get(RC_CHANNEL_STEERING, &sample)) {
-            printf("steering: %u us, normalized=%+.3f\n",
-                   sample.pulse_us, steering_normalized());
+            printf("steering: input=%u us, output=%u us, normalized=%+.3f\n",
+                   sample.pulse_us, servo_output_get_pulse(), steering_normalized());
         } else {
-            printf("steering: missing\n");
+            printf("steering: input=missing, output=%u us (center fallback)\n",
+                   servo_output_get_pulse());
         }
         vTaskDelay(pdMS_TO_TICKS(MONITOR_INTERVAL_MS));
     }
@@ -1060,12 +1260,18 @@ void powertrain_monitor_arm(void)
     while (esp_timer_get_time() < end_at_us) {
         rc_channel_sample_t sample;
         if (rc_input_get(RC_CHANNEL_ARM, &sample)) {
-            printf("arm: %u us, request=%s, rearm_cycle=%s\n",
+            printf("arm: %u us, position=%s, request=%s, rearm_cycle=%s\n",
                    sample.pulse_us,
+                   arm_position_name(sample.pulse_us),
                    arm_requests_run(sample.pulse_us) ? "RUN" : "STOP",
                    arm_cycle_ready ? "ready" : "required");
         } else {
-            printf("arm: missing\n");
+            int64_t now_us = esp_timer_get_time();
+            printf("arm: missing, last=%u us, age=%lu ms, GPIO%d level=%d\n",
+                   sample.pulse_us,
+                   (unsigned long)rc_sample_age_ms(&sample, now_us),
+                   PIN_RC_ARM_INPUT,
+                   gpio_get_level(PIN_RC_ARM_INPUT));
         }
         vTaskDelay(pdMS_TO_TICKS(MONITOR_INTERVAL_MS));
     }
@@ -1144,7 +1350,7 @@ void powertrain_print_help(void)
     printf("  cal esc arm | cal esc max | cal esc min | cal manual | cal cancel\n");
     printf("  monitor throttle | steering | arm | tv | rpm | imu | vector\n");
     printf("  config reverse <0-100>\n");
-    printf("  config failsafe <pulse_us> <window_us>\n");
+    printf("  config failsafe off | <pulse_us> <window_us>\n");
     printf("  config rpm poles <even 2-60>\n");
     printf("  config tv authority <0-25>\n");
     printf("  config tv gains <yaw_gain_dps> <turn_rpm_gain> <yaw_kp> <yaw_ki> <rpm_kp>\n");
@@ -1173,7 +1379,9 @@ static void sensor_task(void *arg)
             }
             elapsed_ms = 0;
         }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SENSOR_UPDATE_INTERVAL_MS));
+        wait_for_next_period(&last_wake,
+                             pdMS_TO_TICKS(SENSOR_UPDATE_INTERVAL_MS),
+                             &sensor_overrun_count);
     }
 }
 
@@ -1182,6 +1390,7 @@ static void powertrain_task(void *arg)
     (void)arg;
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
+        update_steering_servo();
         handle_receiver_arm_control();
 
         if (system_state == SYSTEM_DRIVE_ARMED) {
@@ -1190,7 +1399,7 @@ static void powertrain_task(void *arg)
             rc_channel_sample_t throttle;
             if (throttle_matches_failsafe() || !throttle_sample(&throttle)) {
                 powertrain_cal_cancel();
-                printf("\nWARN: manual ESC relay stopped due to receiver failsafe\n> ");
+                printf("\nWARN: manual ESC relay stopped due to receiver signal loss or failsafe\n> ");
             } else {
                 esc_output_set_all(throttle.pulse_us, esc_limits.reverse_low_us);
             }
@@ -1206,7 +1415,9 @@ static void powertrain_task(void *arg)
             }
         }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(DRIVE_UPDATE_INTERVAL_MS));
+        wait_for_next_period(&last_wake,
+                             pdMS_TO_TICKS(DRIVE_UPDATE_INTERVAL_MS),
+                             &powertrain_overrun_count);
     }
 }
 
@@ -1222,6 +1433,8 @@ esp_err_t powertrain_controller_init(void)
     config_store_load_drive(&drive_config);
 
     err = esc_output_init(&esc_limits);
+    if (err != ESP_OK) return err;
+    err = servo_output_init(steering_cal.center_us);
     if (err != ESP_OK) return err;
     err = rc_input_init();
     if (err != ESP_OK) return err;
@@ -1242,11 +1455,12 @@ esp_err_t powertrain_controller_init(void)
 
     reset_drive_state();
     esc_output_set_safe();
+    servo_output_set_neutral();
     return ESP_OK;
 }
 
 void powertrain_controller_start(void)
 {
     xTaskCreate(sensor_task, "sensors", 4096, NULL, 6, NULL);
-    xTaskCreate(powertrain_task, "powertrain", 6144, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(powertrain_task, "powertrain", 6144, NULL, 5, NULL, 1);
 }

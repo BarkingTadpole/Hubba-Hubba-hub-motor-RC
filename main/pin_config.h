@@ -11,9 +11,12 @@
 
 /* Radiolink R7FG PWM inputs. */
 #define PIN_RC_THROTTLE_INPUT GPIO_NUM_25
-#define PIN_RC_STEERING_INPUT GPIO_NUM_32
+#define PIN_RC_STEERING_INPUT GPIO_NUM_16
 #define PIN_RC_ARM_INPUT GPIO_NUM_33
 #define PIN_RC_TV_MODE_INPUT GPIO_NUM_26
+
+/* Steering servo output. Receiver CH1 is routed through the ESP32. */
+#define PIN_STEERING_SERVO_OUTPUT GPIO_NUM_32
 
 /* Four independent ESC throttle outputs. */
 #define PIN_ESC_FL_THROTTLE GPIO_NUM_13

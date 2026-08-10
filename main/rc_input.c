@@ -4,6 +4,7 @@
 
 #include "driver/gpio.h"
 #include "esp_attr.h"
+#include "esp_intr_alloc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "pin_config.h"
@@ -80,7 +81,7 @@ esp_err_t rc_input_init(void)
         return err;
     }
 
-    err = gpio_install_isr_service(0);
+    err = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }

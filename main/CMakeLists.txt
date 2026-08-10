@@ -8,6 +8,7 @@ idf_component_register(
         "powertrain_controller.c"
         "rc_input.c"
         "rpm_sensor.c"
+        "servo_output.c"
         "torque_vectoring.c"
     PRIV_REQUIRES
         esp_driver_gpio
