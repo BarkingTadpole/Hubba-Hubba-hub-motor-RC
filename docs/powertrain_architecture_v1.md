@@ -28,10 +28,40 @@ identical but the four throttle outputs may differ by a guarded correction.
 - `ESC_CAL_ARMED`: calibration prepared, safe outputs active.
 - `ESC_CAL_MAX`: all throttle outputs `1940 us`, reverse outputs `1100 us`.
 - `ESC_CAL_MIN`: all throttle and reverse outputs `1100 us`.
-- `ESC_CAL_MANUAL`: receiver throttle PWM is directly relayed to all ESC
-  throttle inputs; reverse stays low.
+- `ESC_CAL_MANUAL`: receiver throttle PWM is clamped to `1100-1940 us` and
+  relayed to all ESC throttle inputs; reverse stays low.
 
-No drive or ESC calibration mode is entered automatically at boot.
+No drive or ESC calibration mode is entered automatically at boot. ESC LEDC
+outputs are initialized to safe pulses before NVS, receiver, sensor, or CLI
+initialization. A failure to create the required powertrain task leaves safe
+outputs active and does not start the CLI. CLI commands and the periodic
+powertrain update serialize state/output transitions with a recursive mutex,
+so a stale drive iteration cannot overwrite a concurrent disarm or
+calibration command.
+
+After the IMU initializes, startup assumes the chassis is level and stationary
+and blocks for five seconds while sampling its gyro yaw bias. Powertrain and
+sensor tasks, CLI handling, and arming do not begin until this attempt ends;
+the previously established ESC safe PWM continues in hardware. Success or
+failure is printed over serial. Failure is non-fatal to equal-output driving
+but keeps torque vectoring unavailable until a disarmed `cal imu` retry
+succeeds. Beginning a retry invalidates the previous bias, so failure cannot
+silently retain a stale calibration.
+
+The DOIT DevKit's controllable onboard LED shares GPIO2 with the front-left
+ESC reverse output. It cannot be flashed without corrupting the required ESC
+direction PWM, and the board's power LED is hardwired. Therefore, startup
+calibration does not use an onboard LED and the pin assignments remain
+unchanged. A visual status indicator requires an external LED on a separately
+assigned free GPIO.
+
+ESP-IDF 6's thread-safe `ledc_set_duty_and_update()` API depends on the LEDC
+fade service even for an immediate, non-fading update. After all eight ESC
+channels are configured with safe initial duty, `esc_output_init()` installs
+that service before calling the update API. Installation failure is returned
+to `app_main`, which keeps the application in its non-driving startup error
+loop. The service is a driver requirement, not a commanded throttle fade and
+does not alter the 50 Hz pulses or pin map.
 
 ## 3. Pin Assignment
 
@@ -97,7 +127,11 @@ in this version. `CONFIG_FREERTOS_HZ=1000` is required so the 5 ms sensor
 period converts to a nonzero FreeRTOS delay; the firmware also enforces this
 constraint at compile time. Both periodic tasks reset their schedule and
 block for at least one tick after a missed deadline so an overrun cannot turn
-into a watchdog-starving catch-up loop. `status` reports both overrun counts.
+into a watchdog-starving catch-up loop. `status` reports both overrun counts,
+maximum observed execution time, minimum free stack for both tasks, and
+current/minimum/largest-block heap values. These are runtime observations and
+must be recorded during worst-case hardware operation; a successful build
+does not establish real-time headroom.
 
 ## 4. Electrical Wiring
 
@@ -129,11 +163,90 @@ signal tester, not with a multimeter's DC voltage mode.
 
 The servo starts at the saved steering center, follows valid CH1 commands at
 50 Hz, clamps commands to the calibrated left/right endpoints, and applies
-the steering deadband at center. Missing CH1 returns the servo to center. A
-matching CH2 transmitter-off pulse also centers it when the optional
-throttle-pulse detector is enabled. Either CH4 STOP/OFF position disables
-motor power but
-does not disable valid steering control.
+the steering deadband at center. A configurable first-order command filter
+smooths valid requests; its default time constant is `60 ms` and `0 ms`
+disables it. Before smoothing, a neutral guard rejects isolated CH1 frames
+outside the center deadband. It releases only after two distinct consecutive
+receiver frames lie on the same side of center, adding approximately one
+`20 ms` receiver frame when steering begins. Once released, off-center
+steering follows the existing path without additional confirmation. The first
+in-deadband frame commands center and two consecutive centered frames relock
+the guard. Missing CH1, the configured throttle failsafe, startup, and a new
+steering calibration immediately recenter it. `status` and
+`monitor steering` expose `locked`, `pending-low`, `pending-high`, or
+`tracking` plus a rejected-spike counter. The saved trim is applied after the
+guard and before filtering and is limited to
+`+/-15 degrees` on a nominal `1000 us = 90 degrees` servo-command scale. This
+is command-space trim, not a claim about measured road-wheel angle. Both trim
+and filtered output remain clamped to the learned endpoints. A trim command is
+rejected if its center would not remain strictly between those endpoints; a
+persisted trim is reset to zero if a later steering calibration makes it
+invalid.
+
+Steering setup requires a verified trim entry in the persistent NVS drive
+configuration (`cfg/st_trim10`); a stored zero is valid when the linkage is
+already centered. While disarmed, this one-shot command validates and saves a
+trim, waits one drive update for it to take effect, and then starts the normal
+30-second steering monitor:
+
+```text
+monitor steering trim <-15..15>
+```
+
+If the NVS write fails, the controller restores the previous in-memory trim
+and does not start the monitor. `config steering trim` remains available when
+monitoring is not needed.
+
+Missing CH1 returns the servo to the trimmed center immediately rather than
+ramping through the filter. A matching CH2 transmitter-off pulse does the
+same when the optional throttle-pulse detector is enabled. Either CH4
+STOP/OFF position disables motor power but does not disable valid steering
+control. Configuration changes are accepted only while disarmed:
+
+```text
+config steering trim <-15..15>
+config steering smoothing <0-500>
+```
+
+### Steering Curves
+
+The corrected steering data contains 45 points from `-45` to `+45` servo
+degrees. Most samples are two degrees apart, with three-degree intervals
+between `40` and `43 degrees` in each direction. Source servo-positive steers
+the vehicle left. The wheel-angle signs are local to each wheel: positive
+means that wheel points outward, and negative means it points inward.
+
+Firmware converts the supplied angles into the controller's common
+positive-right heading frame:
+
+```text
+runtime_servo = -source_servo
+runtime_LF    = -source_LF
+runtime_RF    =  source_RF
+```
+
+Consequently, the supplied center values `LF=+1.64` and `RF=+1.64 degrees`
+represent symmetric toe-out. They become runtime `LF=-1.64` and
+`RF=+1.64 degrees`; their average is exactly zero and does not request yaw.
+
+`steering_curve.c` stores all 45 rows verbatim and performs deterministic
+linear interpolation between the two bounding servo samples. The applied,
+smoothed GPIO32 pulse is converted to nominal servo-command degrees relative
+to the trimmed center using `1000 us = 90 degrees`. Values beyond the measured
+range saturate to the nearest endpoint. Interpolation produces separate LF/RF
+headings, their common-frame mean, and a direction-specific normalized mean:
+`+29.738 degrees` is full right and `-31.079 degrees` is full left. That
+normalized mean is the steering input to the empirical torque-vectoring
+target. The curve never changes the servo output.
+
+The earlier 91-point CSV and its cubic fits were superseded by this corrected
+table and are not evaluated by the control path. Linear interpolation avoids
+inventing values beyond the adjacent measurements and preserves the supplied
+toe geometry and endpoints.
+
+`monitor steering` reports applied nominal servo angle, LF/RF interpolated
+angles, average, normalized value, and curve saturation. These angles are
+provided calibration data, not new on-car measurements by this firmware.
 
 Use the R7FG in standard PWM mode with its integrated gyro disabled. The
 receiver gyro modifies steering before the ESP32 observes it and would add
@@ -183,10 +296,21 @@ For each HW86060041:
 - Black connects to common ground.
 - White is the RPM pulse output. Condition it to 3.3 V before the ESP32.
 
+The currently proposed `1 kOhm` series / `2 kOhm` shunt divider produces
+`3.33 V` from an exact `5.00 V` input. At `5.40 V` it produces `3.60 V`, the
+ESP32 data-sheet input maximum at a 3.3 V supply, so it has essentially no
+overvoltage margin. A `10 kOhm` series / `15 kOhm` shunt divider produces
+about `3.00 V` from 5.0 V and remains above the ESP32's approximately
+`2.48 V` minimum high threshold. Neither divider substitutes for measuring
+the actual rail, the white-wire high level, and the pulse shape. If white is
+open-collector/open-drain, provide an external pull-up because GPIO34-39 have
+no internal pulls; do not assume the divider alone creates a logic high.
+
 The phase-tap wiring carries traction-battery switching voltage. Insulate and
-strain-relieve these connections. The
-[Hobbywing RPM sensor page](https://www.hobbywingdirect.com/products/rpm-sensor)
-and its linked manual cover the lead functions and voltage ranges.
+strain-relieve these connections. The official
+[Hobbywing sensor instructions](https://www.hobbywing.com/uploads/file/20220817/046abfc86910635cb6fa868ce1efe1b4.pdf)
+cover the lead functions and voltage ranges, but do not specify the output
+stage or pulse ratio.
 
 ### IMU
 
@@ -199,7 +323,9 @@ documents the board connections.
 
 ## 5. ESC Signal Model
 
-The local [Skywalker ESC manual](../Skywalker_ESC_Manual.pdf) specifies:
+The reviewed local
+[Skywalker ESC manual](../../rc_car_showcase/public/project-docs/Skywalker_ESC_Manual.pdf)
+specifies:
 
 - Default throttle range: `1100 us` to `1940 us`.
 - White wire: throttle magnitude.
@@ -223,7 +349,10 @@ reverse:
 
 The default reverse limit is 10 percent. A direction change first ramps
 throttle to minimum, holds for 120 ms, changes the reverse outputs, and then
-ramps back up.
+ramps back up. A neutral receiver command ramps magnitude down but retains the
+current yellow-wire direction; it never flips the direction output while the
+ESC throttle pulse is above minimum. The ESC output module clamps every write
+to the configured endpoint ranges as a final boundary check.
 
 ## 6. RPM Conversion and Calibration
 
@@ -232,33 +361,60 @@ The official Skywalker 2820SL 550KV specification identifies the motor as
 [Hobbywing motor specification](https://www.hobbywing.com/en/products/skywalker2814).
 
 The firmware counts rising edges from each phase-derived RPM signal with an
-ESP32 PCNT unit and interprets one pulse cycle as one electrical revolution:
+ESP32 PCNT unit. Conversion now uses an explicit pulses-per-mechanical-
+revolution value:
 
 ```text
-pole_pairs = motor_poles / 2 = 7
-mechanical_rpm = pulse_frequency_hz * 60 / pole_pairs
+mechanical_rpm = pulse_frequency_hz * 60 / pulses_per_revolution
 
 mechanical_rpm = rising_edge_count * 60,000,000
                  --------------------------------
-                 elapsed_time_us * pole_pairs
+                 elapsed_time_us * pulses_per_revolution
 ```
 
-RPM uses a rolling window of five 20 ms samples. A channel becomes invalid
-if no pulse is seen for 250 ms. The default is 14 poles and can be changed:
+On 2026-08-12, the user directly counted seven sensor-output rising edges in
+one mechanical wheel/motor revolution. This confirms the compiled `7 PPR`
+conversion for the tested hardware even though the sensor manual does not
+specify the ratio. `config rpm ppr` remains the authoritative setting. The
+legacy pole command is retained for stored-configuration and CLI
+compatibility; with 14 poles it derives the same PPR:
 
 ```text
+config rpm ppr 7
 config rpm poles 14
 ```
 
-The sensor manual does not explicitly state the pulse count per mechanical
-revolution, so verify this conversion before enabling vectoring:
+Sampling occurs every `20 ms`. The estimator uses at least five samples
+(`~100 ms`) and expands to at most 25 samples (`~500 ms`) until it collects
+four rising edges. At the default 7 PPR, the single-count resolution is about
+`85.7 RPM` over 100 ms and `17.1 RPM` over 500 ms. This explains an apparent
+`~86 RPM` low-end step; it is counting quantization, not proof of real wheel
+motion. A channel becomes invalid 250 ms after its last pulse, even if older
+edges remain in the rolling window.
+
+`monitor rpm` reports raw frequency, edge count, actual window duration, and
+derived RPM for all wheels. Torque vectoring also requires every sensor's raw
+frequency to be at least `16.7 Hz`, matching the sensor's documented minimum
+for its 2-pole reference. Low-frequency readings can still be monitored for
+diagnosis but cannot activate closed-loop correction.
+
+The sensor documentation does not state output logic type, high voltage, duty
+cycle, or pulse ratio. The direct count resolved the ratio for the tested
+motor/sensor, but verify the electrical interface and counting accuracy on all
+four installed channels before enabling vectoring:
 
 1. Leave torque vectoring disabled and lift the car.
 2. Send `monitor rpm`.
-3. Spin one wheel at a time and confirm the matching FL/FR/RL/RR channel.
-4. Compare displayed RPM at several speeds with an optical tachometer.
-5. A constant factor error indicates an incorrect poles/pulses assumption,
-   not a gain error. Do not tune the vectoring controller around it.
+3. Spin one wheel at a time and confirm the matching FL/FR/RL/RR channel and
+   that inactive channels do not count noise.
+4. Scope sensor white before and after conditioning. Record sensor supply,
+   low/high voltage, pulse width, frequency, and whether the output needs an
+   external pull-up. GPIO34-39 have no internal pull-ups.
+5. Compare displayed RPM at several stable speeds with an optical tachometer.
+   Confirm that `frequency_hz * 60 / tach_rpm` remains near 7 on every wheel.
+6. Any departure from 7, nonlinear error, or channel disagreement indicates
+   missed/extra edges, noise, or a hardware difference and must not be hidden
+   by controller tuning.
 
 Because these are hub motors, motor RPM and wheel RPM are the same.
 
@@ -378,10 +534,12 @@ power starts disconnected.
 Any missing/non-STOP CH4 signal or a 30-second command timeout returns all
 outputs to safe values.
 
-`cal manual` is an alternate 30-second bench mode that directly relays CH2
-PWM to all four throttle outputs while holding reverse low. CH4 leaving STOP,
-signal loss, timeout, or `cal cancel` stops the relay. A configured throttle
-failsafe match also stops it when that detector is enabled.
+`cal manual` is an alternate 30-second bench mode that relays CH2 PWM, clamped
+to the ESC's `1100-1940 us` throttle range, to all four throttle outputs while
+holding reverse low. It is unavailable until CH4 has a saved calibration and
+is in either learned STOP position. CH4 leaving STOP, signal loss, timeout,
+or `cal cancel` stops the relay. A configured throttle failsafe match also
+stops it when that detector is enabled.
 
 ## 10. Torque-Vectoring Controller
 
@@ -391,25 +549,32 @@ the same throttle to all four ESCs.
 Before `tv enable` is accepted during a boot:
 
 - `cal steering` and `cal tv` must be stored.
-- `cal imu` must succeed with the car level and stationary.
+- The five-second startup calibration or a later `cal imu` retry must succeed
+  with the car level and stationary.
 - Every RPM input must have produced valid pulses. Use `monitor rpm` and
   rotate each wheel.
+- The sensor task must have started successfully.
 
 IMU gyro bias is intentionally calibrated each boot because temperature and
-mounting bias drift. If IMU or RPM data becomes invalid while driving, the
-controller immediately falls back to equal throttle outputs.
+mounting bias drift. If IMU or RPM data becomes invalid while driving, if an
+input/configuration becomes non-finite, or if any RPM raw frequency is below
+`16.7 Hz`, the controller immediately resets its integral and falls back to
+equal throttle outputs.
 
 ### CH5 Modes
 
-- OFF: equal four-wheel commands.
+- OFF: equal four-wheel commands. A CH5 pulse outside all three learned
+  `+/-125 us` windows is also treated as OFF.
 - STRAIGHT: active only while steering is within 6 percent of center. Target
   yaw rate and left/right RPM difference are both zero.
 - FULL: steering creates empirical target yaw rate and left/right RPM
   difference. It includes the straight controller around center.
 
-Positive normalized steering means right. For a right-turn correction, the
-left pair receives positive correction and the right pair receives equal
-negative correction:
+Positive normalized steering means right. It is the direction-normalized mean
+of the supplied LF/RF road-wheel curves evaluated at the applied servo output,
+not raw receiver or servo travel. For a right-turn correction, the left pair
+receives positive correction and the right pair receives equal negative
+correction:
 
 ```text
 FL = base + correction
@@ -421,8 +586,9 @@ RR = base - correction
 The controller uses:
 
 ```text
-target_yaw = steering * turn_yaw_gain * base_throttle
-desired_side_rpm_delta = steering * turn_rpm_gain
+curve_steering = average_road_wheel_angle / direction_specific_max_angle
+target_yaw = curve_steering * turn_yaw_gain * base_throttle
+desired_side_rpm_delta = curve_steering * turn_rpm_gain
 
 yaw_error = target_yaw - measured_yaw
 rpm_error = desired_side_rpm_delta
@@ -432,6 +598,13 @@ correction = yaw_kp * yaw_error
              + yaw_ki * integrated_yaw_error
              + rpm_kp * rpm_error
 ```
+
+The sign convention is internally consistent: positive steering and positive
+yaw both mean a right turn, and positive correction adds left-side torque
+while removing the same amount on the right. The integral is conditionally
+held when the requested correction is saturated and additional integration
+would drive farther into saturation. This is anti-windup for the existing
+controller; it does not make the empirical yaw target a vehicle model.
 
 Correction defaults to at most `+/-10%` of full throttle span. Left and
 right corrections are equal and opposite, so requested mean power is
@@ -465,6 +638,10 @@ at low speed, starting with authority at 2 to 5 percent.
   interrupts on CPU0.
 - `esc_output.c`: generates eight independent 50 Hz LEDC outputs.
 - `servo_output.c`: generates the independent 50 Hz GPIO32 steering output.
+- `steering_center_guard.c`: rejects isolated frames while steering is
+  centered and validates departure using distinct receiver timestamps.
+- `steering_curve.c`: interpolates the supplied 45-point LF/RF road-wheel
+  curves and converts their sign convention for controller use.
 - `rpm_sensor.c`: owns four hardware PCNT units and RPM conversion.
 - `imu_sensor.c`: configures and reads the ISM330DHCX over I2C.
 - `torque_vectoring.c`: contains the sensor controller and balanced wheel
@@ -478,7 +655,10 @@ at low speed, starting with authority at 2 to 5 percent.
 1. Test with traction power disconnected and inspect all nine PWM outputs.
 2. Calibrate and monitor each receiver channel.
 3. Verify the GPIO32 servo output follows CH1, respects both calibrated
-   endpoints, and centers when CH1 disappears.
+   endpoints, and centers when CH1 disappears. Compare `monitor steering`
+   curve angles with physical road-wheel measurements at center, intermediate
+   points, and both endpoints; abort if the wheel-local sign conversion,
+   centered toe-out, or measured angles differ.
 4. Verify both CH4 STOP/OFF positions disarm from every drive state while
    steering remains responsive.
 5. Turn the transmitter off and verify safe ESC outputs and centered steering,

@@ -232,6 +232,9 @@ void config_store_load_drive(drive_config_t *config)
         .receiver_failsafe_us = DEFAULT_RC_THROTTLE_FAILSAFE_US,
         .receiver_failsafe_window_us = DEFAULT_RC_THROTTLE_FAILSAFE_WINDOW_US,
         .motor_poles = 14,
+        .rpm_pulses_per_revolution = 7,
+        .steering_trim_tenths_deg = 0,
+        .steering_smoothing_ms = 60,
         .torque_vectoring_enabled = false,
         .tv_authority_percent = 10,
         .tv_turn_yaw_gain_dps = 180.0f,
@@ -249,6 +252,7 @@ void config_store_load_drive(drive_config_t *config)
     uint8_t u8 = 0;
     uint16_t u16 = 0;
     uint32_t u32 = 0;
+    int16_t i16 = 0;
     int8_t i8 = 0;
 
     if (nvs_get_u8(nvs, "rev_limit", &u8) == ESP_OK && u8 <= 100) {
@@ -265,7 +269,18 @@ void config_store_load_drive(drive_config_t *config)
     }
     if (nvs_get_u8(nvs, "mtr_poles", &u8) == ESP_OK &&
         u8 >= 2 && u8 <= 60 && (u8 % 2) == 0) {
-        config->motor_poles = u8; found = true;
+        config->motor_poles = u8;
+        config->rpm_pulses_per_revolution = u8 / 2;
+        found = true;
+    }
+    if (nvs_get_u16(nvs, "rpm_ppr", &u16) == ESP_OK && u16 >= 1 && u16 <= 120) {
+        config->rpm_pulses_per_revolution = u16; found = true;
+    }
+    if (nvs_get_i16(nvs, "st_trim10", &i16) == ESP_OK && i16 >= -150 && i16 <= 150) {
+        config->steering_trim_tenths_deg = i16; found = true;
+    }
+    if (nvs_get_u16(nvs, "st_smooth", &u16) == ESP_OK && u16 <= 500) {
+        config->steering_smoothing_ms = u16; found = true;
     }
     if (nvs_get_u8(nvs, "tv_en", &u8) == ESP_OK && u8 <= 1) {
         config->torque_vectoring_enabled = u8 != 0; found = true;
@@ -306,6 +321,9 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_us", config->receiver_failsafe_us);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_window", config->receiver_failsafe_window_us);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "mtr_poles", config->motor_poles);
+    if (err == ESP_OK) err = nvs_set_u16(nvs, "rpm_ppr", config->rpm_pulses_per_revolution);
+    if (err == ESP_OK) err = nvs_set_i16(nvs, "st_trim10", config->steering_trim_tenths_deg);
+    if (err == ESP_OK) err = nvs_set_u16(nvs, "st_smooth", config->steering_smoothing_ms);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "tv_en", config->torque_vectoring_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "tv_auth", config->tv_authority_percent);
     if (err == ESP_OK) err = nvs_set_u32(nvs, "yaw_gain", float_to_scaled(config->tv_turn_yaw_gain_dps));

@@ -1,6 +1,7 @@
 #include "servo_output.h"
 
 #include "driver/ledc.h"
+#include "freertos/FreeRTOS.h"
 #include "pin_config.h"
 
 #define SERVO_FRAME_HZ 50
@@ -12,6 +13,7 @@
 
 static uint16_t neutral_pulse_us;
 static uint16_t current_pulse_us;
+static portMUX_TYPE output_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static uint16_t clamp_pulse(uint16_t pulse_us)
 {
@@ -73,11 +75,13 @@ void servo_output_set_pulse(uint16_t pulse_us)
         return;
     }
 
+    ESP_ERROR_CHECK(ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,
+                                             LEDC_CHANNEL_0,
+                                             pulse_us_to_duty(clamped_pulse_us),
+                                             0));
+    portENTER_CRITICAL(&output_lock);
     current_pulse_us = clamped_pulse_us;
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE,
-                                  LEDC_CHANNEL_0,
-                                  pulse_us_to_duty(current_pulse_us)));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+    portEXIT_CRITICAL(&output_lock);
 }
 
 void servo_output_set_neutral(void)
@@ -87,5 +91,8 @@ void servo_output_set_neutral(void)
 
 uint16_t servo_output_get_pulse(void)
 {
-    return current_pulse_us;
+    portENTER_CRITICAL(&output_lock);
+    uint16_t pulse_us = current_pulse_us;
+    portEXIT_CRITICAL(&output_lock);
+    return pulse_us;
 }

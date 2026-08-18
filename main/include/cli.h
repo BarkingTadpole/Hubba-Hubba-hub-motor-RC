@@ -1,3 +1,5 @@
 #pragma once
 
-void cli_start(void);
+#include "esp_err.h"
+
+esp_err_t cli_start(void);

@@ -8,7 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "pin_config.h"
 
-#define RPM_ROLLING_SAMPLES 5
+#define RPM_MIN_WINDOW_SAMPLES 5
+#define RPM_MAX_WINDOW_SAMPLES 25
+#define RPM_MIN_EDGES_PER_ESTIMATE 4
 #define RPM_SIGNAL_TIMEOUT_US 250000
 
 typedef struct {
@@ -25,26 +27,27 @@ static const gpio_num_t rpm_pins[POWERTRAIN_WHEEL_COUNT] = {
 
 static pcnt_unit_handle_t units[POWERTRAIN_WHEEL_COUNT];
 static pcnt_channel_handle_t channels[POWERTRAIN_WHEEL_COUNT];
-static rpm_window_sample_t sample_windows[POWERTRAIN_WHEEL_COUNT][RPM_ROLLING_SAMPLES];
+static rpm_window_sample_t sample_windows[POWERTRAIN_WHEEL_COUNT][RPM_MAX_WINDOW_SAMPLES];
 static int64_t last_pulse_at_us[POWERTRAIN_WHEEL_COUNT];
 static int64_t last_update_at_us;
 static size_t window_index;
-static uint8_t configured_motor_poles = 14;
+static uint16_t configured_pulses_per_revolution = 7;
 static rpm_snapshot_t current_snapshot;
 static portMUX_TYPE snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static bool motor_poles_valid(uint8_t motor_poles)
+static bool pulses_per_revolution_valid(uint16_t pulses_per_revolution)
 {
-    return motor_poles >= 2 && motor_poles <= 60 && (motor_poles % 2) == 0;
+    return pulses_per_revolution >= 1 && pulses_per_revolution <= 120;
 }
 
-esp_err_t rpm_sensor_init(uint8_t motor_poles)
+esp_err_t rpm_sensor_init(uint16_t pulses_per_revolution)
 {
-    if (!motor_poles_valid(motor_poles)) {
+    if (!pulses_per_revolution_valid(pulses_per_revolution)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    configured_motor_poles = motor_poles;
+    configured_pulses_per_revolution = pulses_per_revolution;
 
     for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
         pcnt_unit_config_t unit_config = {
@@ -98,20 +101,26 @@ esp_err_t rpm_sensor_init(uint8_t motor_poles)
     return ESP_OK;
 }
 
-void rpm_sensor_set_motor_poles(uint8_t motor_poles)
+void rpm_sensor_set_pulses_per_revolution(uint16_t pulses_per_revolution)
 {
-    if (!motor_poles_valid(motor_poles)) {
+    if (!pulses_per_revolution_valid(pulses_per_revolution)) {
         return;
     }
 
-    configured_motor_poles = motor_poles;
+    portENTER_CRITICAL(&state_lock);
+    configured_pulses_per_revolution = pulses_per_revolution;
     memset(sample_windows, 0, sizeof(sample_windows));
+    memset(last_pulse_at_us, 0, sizeof(last_pulse_at_us));
     window_index = 0;
+    portEXIT_CRITICAL(&state_lock);
 }
 
-uint8_t rpm_sensor_motor_poles(void)
+uint16_t rpm_sensor_pulses_per_revolution(void)
 {
-    return configured_motor_poles;
+    portENTER_CRITICAL(&state_lock);
+    uint16_t pulses_per_revolution = configured_pulses_per_revolution;
+    portEXIT_CRITICAL(&state_lock);
+    return pulses_per_revolution;
 }
 
 void rpm_sensor_update(void)
@@ -124,46 +133,77 @@ void rpm_sensor_update(void)
     last_update_at_us = now_us;
 
     float rpm_values[POWERTRAIN_WHEEL_COUNT] = {0};
+    float frequency_values[POWERTRAIN_WHEEL_COUNT] = {0};
+    uint32_t edge_counts[POWERTRAIN_WHEEL_COUNT] = {0};
+    uint32_t window_durations_us[POWERTRAIN_WHEEL_COUNT] = {0};
     bool valid_values[POWERTRAIN_WHEEL_COUNT] = {false};
-    float pole_pairs = (float)configured_motor_poles / 2.0f;
 
+    int counts[POWERTRAIN_WHEEL_COUNT] = {0};
+    bool count_valid[POWERTRAIN_WHEEL_COUNT] = {false};
     for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
-        int count = 0;
-        if (pcnt_unit_get_count(units[i], &count) != ESP_OK) {
+        if (pcnt_unit_get_count(units[i], &counts[i]) != ESP_OK) {
             continue;
         }
-        pcnt_unit_clear_count(units[i]);
+        if (pcnt_unit_clear_count(units[i]) != ESP_OK) {
+            continue;
+        }
+        count_valid[i] = counts[i] >= 0;
+    }
 
-        if (count > 0) {
+    portENTER_CRITICAL(&state_lock);
+    uint16_t pulses_per_revolution = configured_pulses_per_revolution;
+    for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
+        if (!count_valid[i]) {
+            continue;
+        }
+
+        if (counts[i] > 0) {
             last_pulse_at_us[i] = now_us;
         }
 
-        sample_windows[i][window_index].count = count;
+        sample_windows[i][window_index].count = counts[i];
         sample_windows[i][window_index].duration_us = elapsed_us;
 
         int total_count = 0;
         int64_t total_duration_us = 0;
-        for (size_t sample = 0; sample < RPM_ROLLING_SAMPLES; sample++) {
-            total_count += sample_windows[i][sample].count;
-            total_duration_us += sample_windows[i][sample].duration_us;
+        for (size_t samples_used = 0; samples_used < RPM_MAX_WINDOW_SAMPLES; samples_used++) {
+            size_t sample_index =
+                (window_index + RPM_MAX_WINDOW_SAMPLES - samples_used) % RPM_MAX_WINDOW_SAMPLES;
+            total_count += sample_windows[i][sample_index].count;
+            total_duration_us += sample_windows[i][sample_index].duration_us;
+            if (samples_used + 1 >= RPM_MIN_WINDOW_SAMPLES &&
+                total_count >= RPM_MIN_EDGES_PER_ESTIMATE) {
+                break;
+            }
         }
 
         valid_values[i] = last_pulse_at_us[i] > 0 &&
                           (now_us - last_pulse_at_us[i]) <= RPM_SIGNAL_TIMEOUT_US;
         if (valid_values[i] && total_duration_us > 0) {
-            rpm_values[i] = ((float)total_count * 60000000.0f) /
-                            ((float)total_duration_us * pole_pairs);
+            frequency_values[i] = ((float)total_count * 1000000.0f) /
+                                  (float)total_duration_us;
+            rpm_values[i] = (frequency_values[i] * 60.0f) /
+                            (float)pulses_per_revolution;
+            edge_counts[i] = (uint32_t)total_count;
+            window_durations_us[i] = total_duration_us > UINT32_MAX
+                                         ? UINT32_MAX
+                                         : (uint32_t)total_duration_us;
         }
     }
 
-    window_index = (window_index + 1) % RPM_ROLLING_SAMPLES;
+    window_index = (window_index + 1) % RPM_MAX_WINDOW_SAMPLES;
+    portEXIT_CRITICAL(&state_lock);
 
     portENTER_CRITICAL(&snapshot_lock);
     for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
         current_snapshot.rpm[i] = rpm_values[i];
+        current_snapshot.frequency_hz[i] = frequency_values[i];
+        current_snapshot.edge_count[i] = edge_counts[i];
+        current_snapshot.window_us[i] = window_durations_us[i];
         current_snapshot.valid[i] = valid_values[i];
     }
     current_snapshot.updated_at_us = now_us;
+    current_snapshot.pulses_per_revolution = pulses_per_revolution;
     portEXIT_CRITICAL(&snapshot_lock);
 }
 

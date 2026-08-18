@@ -18,6 +18,8 @@
 #define ISM330DHCX_CTRL3_C 0x12
 #define ISM330DHCX_OUTX_L_G 0x22
 #define IMU_STALE_TIMEOUT_US 100000
+#define IMU_I2C_TIMEOUT_MS 10
+#define IMU_MUTEX_TIMEOUT_MS 5
 
 static i2c_master_bus_handle_t i2c_bus;
 static i2c_master_dev_handle_t imu_device;
@@ -37,19 +39,21 @@ static int16_t read_i16(const uint8_t *bytes)
 static esp_err_t write_register(uint8_t reg, uint8_t value)
 {
     uint8_t command[2] = {reg, value};
-    return i2c_master_transmit(imu_device, command, sizeof(command), 50);
+    return i2c_master_transmit(imu_device, command, sizeof(command), IMU_I2C_TIMEOUT_MS);
 }
 
 static esp_err_t read_registers(uint8_t reg, uint8_t *data, size_t data_size)
 {
-    return i2c_master_transmit_receive(imu_device, &reg, 1, data, data_size, 50);
+    return i2c_master_transmit_receive(imu_device, &reg, 1, data, data_size,
+                                       IMU_I2C_TIMEOUT_MS);
 }
 
 static bool read_motion(float gyro_dps[3], float accel_mps2[3])
 {
     uint8_t raw[12];
 
-    if (!initialized || xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    if (!initialized ||
+        xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(IMU_MUTEX_TIMEOUT_MS)) != pdTRUE) {
         return false;
     }
     esp_err_t err = read_registers(ISM330DHCX_OUTX_L_G, raw, sizeof(raw));
@@ -130,7 +134,9 @@ esp_err_t imu_sensor_init(int8_t yaw_sign)
 void imu_sensor_set_yaw_sign(int8_t yaw_sign)
 {
     if (yaw_sign == -1 || yaw_sign == 1) {
+        portENTER_CRITICAL(&snapshot_lock);
         configured_yaw_sign = yaw_sign;
+        portEXIT_CRITICAL(&snapshot_lock);
     }
 }
 
@@ -149,17 +155,23 @@ bool imu_sensor_update(void)
         return false;
     }
 
-    gyro_dps[2] -= gyro_z_bias_dps;
+    portENTER_CRITICAL(&snapshot_lock);
+    float yaw_bias_dps = gyro_z_bias_dps;
+    int8_t yaw_sign = configured_yaw_sign;
+    bool calibrated = bias_calibrated;
+    portEXIT_CRITICAL(&snapshot_lock);
+
+    gyro_dps[2] -= yaw_bias_dps;
 
     portENTER_CRITICAL(&snapshot_lock);
     for (size_t axis = 0; axis < 3; axis++) {
         current_snapshot.gyro_dps[axis] = gyro_dps[axis];
         current_snapshot.accel_mps2[axis] = accel_mps2[axis];
     }
-    current_snapshot.yaw_rate_dps = gyro_dps[2] * (float)configured_yaw_sign;
+    current_snapshot.yaw_rate_dps = gyro_dps[2] * (float)yaw_sign;
     current_snapshot.updated_at_us = now_us;
     current_snapshot.valid = true;
-    current_snapshot.bias_calibrated = bias_calibrated;
+    current_snapshot.bias_calibrated = calibrated;
     portEXIT_CRITICAL(&snapshot_lock);
     return true;
 }
@@ -169,6 +181,12 @@ bool imu_sensor_calibrate_bias(uint32_t duration_ms)
     if (!initialized || duration_ms < 500) {
         return false;
     }
+
+    /* A failed recalibration must not leave an older bias marked as current. */
+    portENTER_CRITICAL(&snapshot_lock);
+    bias_calibrated = false;
+    current_snapshot.bias_calibrated = false;
+    portEXIT_CRITICAL(&snapshot_lock);
 
     double sum = 0.0;
     double sum_squared = 0.0;
@@ -202,8 +220,10 @@ bool imu_sensor_calibrate_bias(uint32_t duration_ms)
         return false;
     }
 
+    portENTER_CRITICAL(&snapshot_lock);
     gyro_z_bias_dps = (float)mean;
     bias_calibrated = true;
+    portEXIT_CRITICAL(&snapshot_lock);
     imu_sensor_update();
     return true;
 }

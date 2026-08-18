@@ -24,7 +24,11 @@
 #define PIN_ESC_RL_THROTTLE GPIO_NUM_21
 #define PIN_ESC_RR_THROTTLE GPIO_NUM_18
 
-/* Four independent ESC reverse/direction outputs. */
+/*
+ * Four independent ESC reverse/direction outputs. The DOIT board's
+ * controllable onboard LED shares GPIO2, so it cannot be blinked independently
+ * while GPIO2 is reserved for the front-left ESC reverse signal.
+ */
 #define PIN_ESC_FL_REVERSE GPIO_NUM_2
 #define PIN_ESC_FR_REVERSE GPIO_NUM_27
 #define PIN_ESC_RL_REVERSE GPIO_NUM_19

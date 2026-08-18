@@ -73,6 +73,14 @@ static void handle_command(char *line)
     } else if (strcmp(line, "monitor throttle") == 0 ||
                strcmp(line, "mon throttle") == 0) {
         powertrain_monitor_throttle();
+    } else if (strncmp(line, "monitor steering trim ", 22) == 0) {
+        float trim_degrees = 0.0f;
+        char extra = '\0';
+        if (sscanf(line + 22, "%f %c", &trim_degrees, &extra) != 1) {
+            printf("ERR: usage is 'monitor steering trim <-15..15>'\n");
+        } else {
+            powertrain_monitor_steering_with_trim(trim_degrees);
+        }
     } else if (strcmp(line, "monitor steering") == 0 ||
                strcmp(line, "mon steering") == 0) {
         powertrain_monitor_steering();
@@ -120,6 +128,29 @@ static void handle_command(char *line)
             printf("ERR: usage is 'config rpm poles <even 2-60>'\n");
         } else {
             powertrain_set_motor_poles((uint8_t)poles);
+        }
+    } else if (strncmp(line, "config rpm ppr ", 15) == 0) {
+        unsigned long pulses_per_revolution = 0;
+        if (!parse_unsigned(line + 15, &pulses_per_revolution) ||
+            pulses_per_revolution > 65535) {
+            printf("ERR: usage is 'config rpm ppr <1-120>'\n");
+        } else {
+            powertrain_set_rpm_pulses_per_revolution((uint16_t)pulses_per_revolution);
+        }
+    } else if (strncmp(line, "config steering trim ", 21) == 0) {
+        float trim_degrees = 0.0f;
+        char extra = '\0';
+        if (sscanf(line + 21, "%f %c", &trim_degrees, &extra) != 1) {
+            printf("ERR: usage is 'config steering trim <-15..15>'\n");
+        } else {
+            powertrain_set_steering_trim(trim_degrees);
+        }
+    } else if (strncmp(line, "config steering smoothing ", 26) == 0) {
+        unsigned long smoothing_ms = 0;
+        if (!parse_unsigned(line + 26, &smoothing_ms) || smoothing_ms > 65535) {
+            printf("ERR: usage is 'config steering smoothing <0-500>'\n");
+        } else {
+            powertrain_set_steering_smoothing((uint16_t)smoothing_ms);
         }
     } else if (strncmp(line, "config tv authority ", 20) == 0) {
         unsigned long percent = 0;
@@ -200,7 +231,9 @@ static void cli_task(void *arg)
     }
 }
 
-void cli_start(void)
+esp_err_t cli_start(void)
 {
-    xTaskCreate(cli_task, "serial_cli", 6144, NULL, 4, NULL);
+    return xTaskCreate(cli_task, "serial_cli", 6144, NULL, 4, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
 }

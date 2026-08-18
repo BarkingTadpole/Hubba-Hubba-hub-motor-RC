@@ -81,6 +81,9 @@ typedef struct {
     uint16_t receiver_failsafe_us;
     uint16_t receiver_failsafe_window_us;
     uint8_t motor_poles;
+    uint16_t rpm_pulses_per_revolution;
+    int16_t steering_trim_tenths_deg;
+    uint16_t steering_smoothing_ms;
     bool torque_vectoring_enabled;
     uint8_t tv_authority_percent;
     float tv_turn_yaw_gain_dps;
@@ -94,8 +97,12 @@ typedef struct {
 
 typedef struct {
     float rpm[POWERTRAIN_WHEEL_COUNT];
+    float frequency_hz[POWERTRAIN_WHEEL_COUNT];
+    uint32_t edge_count[POWERTRAIN_WHEEL_COUNT];
+    uint32_t window_us[POWERTRAIN_WHEEL_COUNT];
     bool valid[POWERTRAIN_WHEEL_COUNT];
     int64_t updated_at_us;
+    uint16_t pulses_per_revolution;
 } rpm_snapshot_t;
 
 typedef struct {

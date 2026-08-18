@@ -191,6 +191,13 @@ the preferred final arrangement because it has poor voltage and noise margin.
 - Earlier physical-switch monitoring problems came from mixing digital and
   ADC interpretations on GPIO33. That design is obsolete now that GPIO33 is
   receiver PWM CH4.
+- On 2026-08-11, the user observed a repeatable boot panic at
+  `esc_output.c:set_pin()` on the first `ledc_set_duty_and_update()` call.
+  ESP-IDF 6 requires its LEDC fade service for that thread-safe API even when
+  updates are immediate. Firmware now installs the service after configuring
+  the eight safe ESC channels and before the first update. The correction has
+  code/build validation only and must be reflashed and checked with traction
+  power disconnected before motor power is restored. No pin changed.
 
 ## ESC Signal Behavior
 
@@ -230,6 +237,31 @@ neutral, full throttle, full reverse, and polarity.
 - Default throttle neutral deadband: `80 us`.
 - Throttle magnitude uses a quadratic response curve.
 - Default maximum reverse magnitude: 10 percent of ESC span.
+- Steering valid-command smoothing is a first-order filter with a default
+  `60 ms` time constant and a configurable `0-500 ms` range. Missing CH1 or a
+  confirmed throttle failsafe centers immediately rather than filtering the
+  safety response.
+- While centered, steering rejects one isolated CH1 frame outside the saved
+  deadband. Two distinct consecutive frames on the same side release the
+  center guard, adding approximately 20 ms only when steering first begins.
+  The first centered frame commands center and two centered frames relock it.
+  Missing CH1, throttle failsafe, startup, and steering calibration recenter
+  the guard. `status` and `monitor steering` expose its state and rejected
+  neutral-spike count.
+- Steering trim is stored in tenths of a degree over `+/-15 degrees`, using a
+  nominal `1000 us = 90 degrees` command-space conversion. It is not a
+  road-wheel angle calibration; trim and smoothing remain clamped to saved
+  steering endpoints. Trim must leave the center strictly inside both
+  endpoints and is reset if a new steering calibration makes it invalid.
+- The corrected 45-point steering table covers `-45` to `+45` servo-command
+  degrees at nonuniform intervals and provides separate LF/RF road-wheel
+  angles. Source servo-positive steers left; each source wheel angle is
+  wheel-local, with positive pointing outward and negative pointing inward.
+  Runtime converts both angles to a common positive-right frame and uses
+  linear interpolation between bounding samples. The centered source values
+  `LF=+1.64` and `RF=+1.64 degrees` describe toe-out; runtime values are
+  `LF=-1.64`, `RF=+1.64`, and zero mean. The curve shapes the torque-vectoring
+  steering input only; it never changes servo pass-through.
 
 CH4 is a three-position receiver shutdown control with one learned RUN/ON
 position and two learned STOP/OFF positions. Arming requires:
@@ -273,7 +305,8 @@ and disarms after a 60 ms confirmation. Complete PWM loss is declared after
 - Main drive update interval: 20 ms.
 - Pre-arm stable RUN/neutral qualification: 250 ms.
 - Missed sensor or drive deadlines reset the periodic schedule and force a
-  one-tick block; `status` exposes cumulative overrun counts.
+  one-tick block; `status` exposes cumulative overrun counts, maximum observed
+  execution time, minimum free task stack, and heap headroom.
 - Acceleration ramp: 12 us of ESC pulse per update.
 - Deceleration ramp: 100 us per update.
 - Direction-change zero hold: 120 ms.
@@ -289,11 +322,13 @@ The HW86060041 observes voltage changes between two motor phases and emits an
 RPM signal. The firmware counts rising edges with one ESP32 PCNT unit per
 wheel.
 
-The current conversion assumes one pulse cycle per electrical revolution:
+The conversion is stored and configured explicitly as pulses per mechanical
+revolution. On 2026-08-12, the user confirmed by direct oscilloscope edge
+count that one mechanical wheel/motor revolution produces seven rising edges:
 
 ```text
-pole_pairs = motor_poles / 2
-mechanical_rpm = pulse_frequency_hz * 60 / pole_pairs
+pulses_per_revolution = 7
+mechanical_rpm = pulse_frequency_hz * 60 / pulses_per_revolution
 
 for the 14-pole motors:
 mechanical_rpm = pulse_frequency_hz * 60 / 7
@@ -301,20 +336,30 @@ mechanical_rpm = pulse_frequency_hz * 60 / 7
 
 Implementation details:
 
-- Default motor pole count: 14.
+- Default PPR: 7, confirmed for the tested motor/sensor by direct rising-edge
+  count over one mechanical revolution.
 - Rising edges only are counted.
 - Sampling interval: 20 ms.
-- Rolling window: five samples, approximately 100 ms.
+- Adaptive rolling window: at least five samples (approximately 100 ms), up
+  to 25 samples (approximately 500 ms) until four edges are available.
 - A speed channel becomes invalid if it sees no pulse for 250 ms.
-- `config rpm poles <even 2-60>` changes the conversion.
+- `monitor rpm` reports raw frequency, edge count, window duration, and RPM.
+- `config rpm ppr <1-120>` changes the authoritative conversion.
+- Legacy `config rpm poles <even 2-60>` also sets PPR to half the pole count.
 
-The Hobbywing sensor documentation does not clearly specify pulse count per
-mechanical revolution. This formula is an informed assumption and must be
-checked against an optical tachometer at several speeds before torque
-vectoring is trusted. A constant factor error means the pulse/pole assumption
-is wrong and must not be hidden by controller tuning.
+The Hobbywing sensor documentation does not specify pulse count per mechanical
+revolution, but the direct measurement confirms that the compiled `7 PPR`
+conversion factor is correct for the tested hardware. All four channels still
+need clean-waveform and optical-tachometer checks at several speeds before
+torque vectoring is trusted; those tests detect missed/extra edges, noise, or
+channel-specific faults rather than establish the already measured ratio.
 
-Because the motors are hub motors, motor RPM and wheel RPM are the same.
+At 7 PPR, count quantization is approximately 85.7 RPM over 100 ms and
+17.1 RPM over 500 ms; the previously observed approximately 86 RPM low-end
+step is consistent with this quantization. Torque vectoring requires at least
+16.7 Hz raw sensor frequency, matching the sensor's documented minimum for
+its 2-pole reference. Because the motors are hub motors, motor RPM and wheel
+RPM are the same.
 
 ## IMU Behavior
 
@@ -327,10 +372,21 @@ Because the motors are hub motors, motor RPM and wheel RPM are the same.
 - FreeRTOS tick rate: 1000 Hz so the 5 ms polling interval is representable.
 - IMU data is stale after 100 ms without a successful read.
 - Yaw-rate sign is configurable as `1` or `-1`.
-- Gyro yaw bias is calibrated for the current boot with `cal imu` while the
-  car is level and completely still.
+- Startup assumes the car is level and completely stationary. After the IMU
+  initializes, firmware automatically samples gyro yaw bias for five seconds
+  before starting the powertrain and sensor tasks. Safe ESC PWM is already
+  active and drive cannot arm during this blocking startup interval.
+- `cal imu` remains available as a two-second disarmed retry. Starting any
+  calibration invalidates the prior current-boot bias; a failed attempt leaves
+  torque vectoring unavailable rather than retaining a stale bias.
 - Torque vectoring requires valid IMU data and a successful current-boot bias
   calibration.
+- The DOIT DevKit's controllable onboard LED is GPIO2, already assigned to the
+  front-left ESC reverse signal. Firmware must not blink it because doing so
+  would corrupt a safety-critical ESC command. The hardwired power LED is not
+  software-controllable. Completion is reported over serial; an LED indicator
+  requires a separate free GPIO and external LED or a deliberate pin-plan
+  revision.
 
 Mount the IMU rigidly near the chassis centerline. The current physical
 orientation has sensor `+X` pointing toward the rear of the car and sensor
@@ -347,6 +403,9 @@ calibrated positions:
   within 6 percent of center.
 - FULL: empirical steering-based yaw and side-RPM targets for turns, including
   straight correction around center.
+
+Each CH5 mode requires a pulse inside its learned `+/-125 us` window. A pulse
+outside all three windows selects OFF rather than the nearest active mode.
 
 The controller operates only in forward drive. Reverse always uses equal
 throttle. It requires valid RPM from all four wheels, valid and bias-calibrated
@@ -367,8 +426,9 @@ RR = base - correction
 Core empirical model:
 
 ```text
-target_yaw = steering * turn_yaw_gain * base_throttle
-desired_side_rpm_delta = steering * turn_rpm_gain
+curve_steering = average_road_wheel_angle / direction_specific_max_angle
+target_yaw = curve_steering * turn_yaw_gain * base_throttle
+desired_side_rpm_delta = curve_steering * turn_rpm_gain
 
 yaw_error = target_yaw - measured_yaw
 rpm_error = desired_side_rpm_delta
@@ -391,13 +451,17 @@ Default configuration:
 
 Corrections are equal and opposite to preserve requested mean power. Available
 authority naturally falls near zero and full throttle because both sides must
-stay inside the ESC output limits.
+stay inside the ESC output limits. The yaw integrator is conditionally held
+when saturation and error would wind it farther into the limit. Non-finite
+configuration/input values, raw RPM below 16.7 Hz, or invalid/stale sensors
+reset the controller and produce equal outputs.
 
-`tv enable` is guarded. During the current boot, `cal imu` must succeed and
-every RPM channel must have produced a valid pulse at least once. Use
-`monitor rpm` and rotate each wheel before enabling. Even if enablement is
-persisted in NVS, the runtime controller remains inactive after reboot until
-the IMU is recalibrated and live sensor data is valid.
+`tv enable` is guarded. During the current boot, the automatic startup IMU
+calibration or a manual `cal imu` retry must succeed, and every RPM channel
+must have produced a valid pulse at least once. Use `monitor rpm` and rotate
+each wheel before enabling. Even if enablement is persisted in NVS, the
+runtime controller remains inactive after reboot until the IMU is recalibrated
+and live sensor data is valid.
 
 Tune at low speed and begin around 2 to 5 percent authority. Verify yaw sign
 by rotating the car right by hand while running `monitor imu`; rightward yaw
@@ -442,7 +506,9 @@ CH4 calibration captures RUN/ON, STOP/OFF 1, and STOP/OFF 2. Existing saved
 two-position CH4 calibration is intentionally treated as uncalibrated until
 `cal arm` is run again.
 Values persist in NVS. IMU bias is intentionally current-boot state rather
-than persistent calibration.
+than persistent calibration. The normal boot performs a five-second automatic
+bias calibration; `cal imu` is a two-second retry if startup calibration fails
+or the vehicle moved during startup.
 
 Guided ESC endpoint calibration:
 
@@ -460,14 +526,17 @@ Guided ESC endpoint calibration:
 Leaving both CH4 STOP/OFF positions, losing a required receiver signal,
 cancellation, or timeout must restore safe output. An enabled and matching
 throttle-pulse detector does the same. `cal manual` directly relays receiver
-throttle to all four ESC throttle outputs for at most 30 seconds while holding
-all reverse outputs low.
+throttle, clamped to the ESC's `1100-1940 us` range, to all four ESC throttle
+outputs for at most 30 seconds while holding all reverse outputs low. ESC
+endpoint calibration and manual relay both require saved CH4 calibration and
+a currently recognized STOP/OFF position.
 
 ### Monitoring
 
 ```text
 monitor throttle
 monitor steering
+monitor steering trim <-15..15>
 monitor arm
 monitor tv
 monitor rpm
@@ -476,7 +545,11 @@ monitor vector
 ```
 
 Monitoring blocks the serial CLI temporarily but does not stop the controller
-or sensor tasks.
+or sensor tasks. Steering setup requires a verified trim value in the NVS
+drive configuration; `0.0 degrees` is valid if no correction is needed.
+`monitor steering trim <degrees>` is accepted only while disarmed, saves the
+validated trim to NVS, waits for it to be applied, and then starts the normal
+steering monitor. A failed NVS write rolls the in-memory value back.
 
 ### Configuration
 
@@ -484,6 +557,9 @@ or sensor tasks.
 config reverse <0-100>
 config failsafe off | <pulse_us> <window_us>
 config rpm poles <even 2-60>
+config rpm ppr <1-120>
+config steering trim <-15..15>
+config steering smoothing <0-500>
 config tv authority <0-25>
 config tv gains <yaw_gain_dps> <turn_rpm_gain> <yaw_kp> <yaw_ki> <rpm_kp>
 config imu yaw-sign <-1|1>
@@ -505,6 +581,10 @@ Configuration changes are accepted only while disarmed and persist in NVS.
 - `main/rc_input.c`: four priority-3 GPIO edge-interrupt PWM inputs.
 - `main/esc_output.c`: eight independent 50 Hz LEDC outputs.
 - `main/servo_output.c`: independent 50 Hz steering PWM on GPIO32.
+- `main/steering_center_guard.c`: distinct-frame neutral steering validation
+  and rejected-spike telemetry.
+- `main/steering_curve.c`: source-backed 45-point LF/RF road-wheel curve and
+  deterministic piecewise-linear interpolation.
 - `main/rpm_sensor.c`: four PCNT units, rolling windows, and RPM conversion.
 - `main/imu_sensor.c`: minimal ISM330DHCX I2C driver and bias calibration.
 - `main/torque_vectoring.c`: sensor feedback, controller state, authority
@@ -546,8 +626,9 @@ These are requirements, not suggestions:
 - Receiver throttle loss or calibration timeout restores safe outputs. An
   enabled configured throttle-pulse detector does the same when it matches.
 - The steering output starts centered, follows only valid CH1 pulses within
-  calibrated endpoints, and centers on CH1 loss. It also centers on a matching
-  throttle pulse when the optional detector is enabled.
+  calibrated endpoints after the two-frame neutral-release guard, and centers
+  on CH1 loss. It also centers on a matching throttle pulse when the optional
+  detector is enabled.
 - Rearming after a safety event requires a healthy STOP/OFF-to-RUN/ON cycle and does
   not require a laptop.
 - Reverse magnitude remains limited by configuration, default 10 percent.
@@ -584,13 +665,17 @@ standalone `tools/esp32_pin_map/open_pin_map.ps1` launcher regenerates and
 opens the same artifact without building firmware.
 
 The modular firmware was last confirmed to compile with ESP-IDF 6.0.1 for
-`esp32`. The last recorded application binary was about `0x34700` bytes with
-roughly 80 percent of the application partition free. Treat size figures as a
-historical baseline and report current build output after new changes.
+`esp32` on 2026-08-12. The recorded application binary was `0x37720` bytes
+with 78 percent of the 1 MiB application partition free. Treat size figures as
+a historical baseline and report current build output after new changes.
 
-There is currently no automated host or hardware test suite. The obsolete
-`pytest_hello_world.py` file was intentionally deleted. At minimum, run a full
-firmware build after code changes. Scale bench testing with risk.
+Host tests cover balanced correction, the RPM frequency guard, non-finite
+fallback, saturation anti-windup, steering-curve endpoints/signs,
+interpolation, saturation, and invalid input. They are hardware-independent
+logic tests, not ESP32 peripheral or vehicle tests. The
+obsolete `pytest_hello_world.py` file was intentionally deleted. At minimum,
+run the host logic test and a full firmware build after related code changes.
+Scale bench testing with risk.
 
 Required bench-test progression for major control changes:
 
@@ -659,17 +744,26 @@ The following must remain visible until physically resolved:
 
 - New RPM sensor wiring and 1 kOhm/2 kOhm dividers have not been confirmed in
   firmware on all four wheels.
-- RPM pulse-to-mechanical-RPM conversion still needs optical-tachometer
-  validation.
+- A direct 2026-08-12 scope count confirmed `7 PPR` for the tested
+  motor/sensor. RPM accuracy, clean counting, and the same ratio on all four
+  installed channels still need optical-tachometer validation across speed;
+  the adaptive window, raw telemetry, and 16.7 Hz control guard otherwise
+  have only logic/build validation.
 - ISM330DHCX orientation, yaw sign, bias behavior, and vibration performance
   need on-car validation.
 - CH1 input, GPIO32 servo output, CH4 shutdown, and CH5 mode PWM calibrations
-  need validation with the actual R7FG and steering servo.
+  need validation with the actual R7FG and steering servo. The new steering
+  trim, smoothing, wheel-local curve signs, centered toe-out, and road-wheel
+  angles also require scope and on-car validation. The supplied curve is input
+  data, not physical validation observed by the firmware review.
 - The CPU-isolated GPIO receiver capture and high-speed LEDC ESC output
-  rollback compiles but still requires traction-disconnected validation while
-  changing throttle and commanding CH4 STOP. Do not power the motors until
-  this passes repeatedly without stale inputs, servo jolts, or task resets.
+  rollback and the 2026-08-11 LEDC fade-service startup fix compile but still
+  require traction-disconnected validation while changing throttle and
+  commanding CH4 STOP. Do not power the motors until this passes repeatedly
+  without stale inputs, servo jolts, boot loops, or task resets.
 - Torque vectoring has compiled but has not been tuned or proven on the car.
+- Runtime `status` timing, stack, and heap instrumentation has compiled but no
+  worst-case hardware data has been captured yet.
 - Boot behavior with the ESC input connected to GPIO2 should be watched
   because it is a strapping pin.
 - Exact ESC SKU and permitted traction-battery cell count must be confirmed

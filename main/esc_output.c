@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "driver/ledc.h"
+#include "freertos/FreeRTOS.h"
 #include "pin_config.h"
 
 #define SERVO_FRAME_HZ 50
@@ -32,6 +33,7 @@ static const pwm_pin_t reverse_pins[POWERTRAIN_WHEEL_COUNT] = {
 
 static esc_limits_t configured_limits;
 static wheel_output_command_t current_output;
+static portMUX_TYPE output_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static uint32_t pulse_us_to_duty(uint16_t pulse_us)
 {
@@ -41,8 +43,17 @@ static uint32_t pulse_us_to_duty(uint16_t pulse_us)
 static void set_pin(const pwm_pin_t *pin, uint16_t pulse_us)
 {
     uint32_t duty = pulse_us_to_duty(pulse_us);
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_HIGH_SPEED_MODE, pin->channel, duty));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_HIGH_SPEED_MODE, pin->channel));
+    ESP_ERROR_CHECK(ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE,
+                                             pin->channel,
+                                             duty,
+                                             0));
+}
+
+static uint16_t clamp_to_range(uint16_t pulse_us, uint16_t minimum, uint16_t maximum)
+{
+    if (pulse_us < minimum) return minimum;
+    if (pulse_us > maximum) return maximum;
+    return pulse_us;
 }
 
 static esp_err_t configure_pin(const pwm_pin_t *pin, uint16_t initial_pulse_us)
@@ -64,7 +75,8 @@ static esp_err_t configure_pin(const pwm_pin_t *pin, uint16_t initial_pulse_us)
 
 esp_err_t esc_output_init(const esc_limits_t *limits)
 {
-    if (limits == NULL || limits->throttle_min_us >= limits->throttle_max_us) {
+    if (limits == NULL || limits->throttle_min_us >= limits->throttle_max_us ||
+        limits->reverse_low_us >= limits->reverse_high_us) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -94,6 +106,16 @@ esp_err_t esc_output_init(const esc_limits_t *limits)
         }
     }
 
+    /*
+     * ESP-IDF 6 implements ledc_set_duty_and_update() through the fade
+     * service, even for immediate duty changes. Install it only after a LEDC
+     * context exists and before the first thread-safe update.
+     */
+    err = ledc_fade_func_install(0);
+    if (err != ESP_OK) {
+        return err;
+    }
+
     esc_output_set_safe();
     return ESP_OK;
 }
@@ -115,13 +137,23 @@ void esc_output_set_wheels(const wheel_output_command_t *command)
     }
 
     for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
-        if (current_output.throttle_us[i] != command->throttle_us[i]) {
-            current_output.throttle_us[i] = command->throttle_us[i];
-            set_pin(&throttle_pins[i], command->throttle_us[i]);
+        uint16_t throttle_us = clamp_to_range(command->throttle_us[i],
+                                              configured_limits.throttle_min_us,
+                                              configured_limits.throttle_max_us);
+        uint16_t reverse_us = clamp_to_range(command->reverse_us[i],
+                                             configured_limits.reverse_low_us,
+                                             configured_limits.reverse_high_us);
+        if (current_output.throttle_us[i] != throttle_us) {
+            set_pin(&throttle_pins[i], throttle_us);
+            portENTER_CRITICAL(&output_lock);
+            current_output.throttle_us[i] = throttle_us;
+            portEXIT_CRITICAL(&output_lock);
         }
-        if (current_output.reverse_us[i] != command->reverse_us[i]) {
-            current_output.reverse_us[i] = command->reverse_us[i];
-            set_pin(&reverse_pins[i], command->reverse_us[i]);
+        if (current_output.reverse_us[i] != reverse_us) {
+            set_pin(&reverse_pins[i], reverse_us);
+            portENTER_CRITICAL(&output_lock);
+            current_output.reverse_us[i] = reverse_us;
+            portEXIT_CRITICAL(&output_lock);
         }
     }
 }
@@ -134,7 +166,9 @@ void esc_output_set_safe(void)
 void esc_output_get(wheel_output_command_t *command)
 {
     if (command != NULL) {
+        portENTER_CRITICAL(&output_lock);
         memcpy(command, &current_output, sizeof(*command));
+        portEXIT_CRITICAL(&output_lock);
     }
 }
 

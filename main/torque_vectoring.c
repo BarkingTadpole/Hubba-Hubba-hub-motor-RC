@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#define RPM_MIN_CONTROL_FREQUENCY_HZ 16.7f
+
 static float clampf(float value, float minimum, float maximum)
 {
     if (value < minimum) {
@@ -21,6 +23,15 @@ static void set_inactive(torque_vectoring_state_t *state,
 {
     state->yaw_integral = 0.0f;
     output->inactive_reason = reason;
+}
+
+static bool finite_config(const drive_config_t *config)
+{
+    return isfinite(config->tv_turn_yaw_gain_dps) &&
+           isfinite(config->tv_turn_rpm_gain) &&
+           isfinite(config->tv_yaw_kp) &&
+           isfinite(config->tv_yaw_ki) &&
+           isfinite(config->tv_rpm_kp);
 }
 
 void torque_vectoring_reset(torque_vectoring_state_t *state)
@@ -42,6 +53,18 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
     memset(output, 0, sizeof(*output));
     output->active_mode = TV_MODE_OFF;
 
+    if (!finite_config(config) || !isfinite(input->base_throttle) ||
+        !isfinite(input->steering) || !isfinite(input->dt_seconds) ||
+        !isfinite(input->imu.yaw_rate_dps)) {
+        set_inactive(state, output, "controller input or configuration is non-finite");
+        return;
+    }
+    if (input->base_throttle < 0.0f || input->base_throttle > 1.0f ||
+        input->steering < -1.0f || input->steering > 1.0f ||
+        input->dt_seconds <= 0.0f || input->dt_seconds > 0.1f) {
+        set_inactive(state, output, "controller input is outside its valid range");
+        return;
+    }
     if (!config->torque_vectoring_enabled) {
         set_inactive(state, output, "disabled in configuration");
         return;
@@ -63,8 +86,14 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
         return;
     }
     for (size_t wheel = 0; wheel < POWERTRAIN_WHEEL_COUNT; wheel++) {
-        if (!input->rpm.valid[wheel]) {
+        if (!input->rpm.valid[wheel] || !isfinite(input->rpm.rpm[wheel]) ||
+            !isfinite(input->rpm.frequency_hz[wheel]) ||
+            input->rpm.rpm[wheel] < 0.0f) {
             set_inactive(state, output, "one or more RPM signals are unavailable");
+            return;
+        }
+        if (input->rpm.frequency_hz[wheel] < RPM_MIN_CONTROL_FREQUENCY_HZ) {
+            set_inactive(state, output, "RPM frequency is below the sensor's documented range");
             return;
         }
     }
@@ -78,11 +107,6 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
     float right_rpm = (input->rpm.rpm[WHEEL_FRONT_RIGHT] +
                        input->rpm.rpm[WHEEL_REAR_RIGHT]) * 0.5f;
     float average_rpm = (left_rpm + right_rpm) * 0.5f;
-    if (average_rpm < 50.0f) {
-        set_inactive(state, output, "wheel speed is too low");
-        return;
-    }
-
     float target_yaw_rate_dps = 0.0f;
     float desired_side_rpm_delta = 0.0f;
     if (input->requested_mode == TV_MODE_FULL) {
@@ -101,21 +125,37 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
         state->yaw_integral = 0.0f;
     }
     state->previous_mode = input->requested_mode;
-    state->yaw_integral += yaw_error_dps * clampf(input->dt_seconds, 0.0f, 0.1f);
+    float proportional_and_rpm = (config->tv_yaw_kp * yaw_error_dps) +
+                                 (config->tv_rpm_kp * side_rpm_error);
+    float candidate_integral = state->yaw_integral +
+                               yaw_error_dps * clampf(input->dt_seconds, 0.0f, 0.1f);
     if (config->tv_yaw_ki > 0.0f) {
         float integral_limit = authority / config->tv_yaw_ki;
-        state->yaw_integral = clampf(state->yaw_integral, -integral_limit, integral_limit);
+        candidate_integral = clampf(candidate_integral, -integral_limit, integral_limit);
     } else {
         state->yaw_integral = 0.0f;
+        candidate_integral = 0.0f;
     }
 
-    float side_correction = (config->tv_yaw_kp * yaw_error_dps) +
-                            (config->tv_yaw_ki * state->yaw_integral) +
-                            (config->tv_rpm_kp * side_rpm_error);
+    float balanced_limit = input->base_throttle;
+    if ((1.0f - input->base_throttle) < balanced_limit) {
+        balanced_limit = 1.0f - input->base_throttle;
+    }
+    if (authority < balanced_limit) {
+        balanced_limit = authority;
+    }
+    float candidate_correction = proportional_and_rpm +
+                                 (config->tv_yaw_ki * candidate_integral);
+    bool candidate_saturated_high = candidate_correction > balanced_limit;
+    bool candidate_saturated_low = candidate_correction < -balanced_limit;
+    if ((!candidate_saturated_high && !candidate_saturated_low) ||
+        (candidate_saturated_high && yaw_error_dps < 0.0f) ||
+        (candidate_saturated_low && yaw_error_dps > 0.0f)) {
+        state->yaw_integral = candidate_integral;
+    }
 
-    float balanced_limit = fminf(authority,
-                                 fminf(input->base_throttle,
-                                       1.0f - input->base_throttle));
+    float side_correction = proportional_and_rpm +
+                            (config->tv_yaw_ki * state->yaw_integral);
     side_correction = clampf(side_correction, -balanced_limit, balanced_limit);
 
     output->wheel_correction[WHEEL_FRONT_LEFT] = side_correction;
