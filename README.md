@@ -25,7 +25,7 @@ main/
   esc_output.c               Four throttle and four reverse PWM outputs
   rpm_sensor.c               Four PCNT-based motor-speed inputs
   imu_sensor.c               ISM330DHCX I2C driver
-  steering_center_guard.c    Two-frame neutral steering validation
+  steering_input_filter.c    Full-range steering spike rejection
   steering_curve.c           Servo-to-road-wheel curve interpolation
   torque_vectoring.c         Straight and turn-assist controller
   pin_config.h               All external pin assignments
@@ -156,12 +156,13 @@ inside both calibrated endpoints.
 Smoothing is a first-order time constant in milliseconds and defaults to
 `60 ms`. A missing CH1 signal still centers the servo immediately. Set
 `config steering smoothing 0` to disable smoothing while troubleshooting.
-While the steering command is centered, a neutral guard holds the output at
-the calibrated center through one isolated out-of-deadband CH1 frame. Two
-consecutive receiver frames on the same side release the guard, adding about
-`20 ms` only when steering first leaves center. `status` and
-`monitor steering` report the guard state and rejected-spike count. The guard
-uses distinct receiver timestamps, so rereading one frame cannot confirm it.
+A three-distinct-frame median filter rejects an isolated valid-looking CH1
+pulse anywhere in the steering range. Once active, it adds one receiver frame,
+approximately `20 ms`, of predictable steering latency. Startup and signal
+recovery hold the saved center until three new frames are available, normally
+about `40-60 ms`. `status` and `monitor steering` report the raw input, median,
+filter state, and a confirmed isolated-spike count. Repeated control-loop reads
+of one receiver frame do not advance the filter.
 
 The corrected 45-point steering table maps the applied, smoothed servo command
 from `-45` to `+45 degrees` into separate left-front and right-front road-wheel

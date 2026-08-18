@@ -241,13 +241,13 @@ neutral, full throttle, full reverse, and polarity.
   `60 ms` time constant and a configurable `0-500 ms` range. Missing CH1 or a
   confirmed throttle failsafe centers immediately rather than filtering the
   safety response.
-- While centered, steering rejects one isolated CH1 frame outside the saved
-  deadband. Two distinct consecutive frames on the same side release the
-  center guard, adding approximately 20 ms only when steering first begins.
-  The first centered frame commands center and two centered frames relock it.
-  Missing CH1, throttle failsafe, startup, and steering calibration recenter
-  the guard. `status` and `monitor steering` expose its state and rejected
-  neutral-spike count.
+- Steering applies a three-distinct-frame median before the first-order command
+  filter. It rejects one isolated valid-looking CH1 pulse across the full
+  range and adds approximately one 20 ms receiver frame of continuous latency.
+  Startup, missing CH1, throttle failsafe, and steering calibration clear its
+  history and hold center until three new frames arrive. Duplicate reads of
+  one receiver timestamp do not advance it. `status` and `monitor steering`
+  expose warmup/active state and a confirmed isolated-spike count.
 - Steering trim is stored in tenths of a degree over `+/-15 degrees`, using a
   nominal `1000 us = 90 degrees` command-space conversion. It is not a
   road-wheel angle calibration; trim and smoothing remain clamped to saved
@@ -581,8 +581,8 @@ Configuration changes are accepted only while disarmed and persist in NVS.
 - `main/rc_input.c`: four priority-3 GPIO edge-interrupt PWM inputs.
 - `main/esc_output.c`: eight independent 50 Hz LEDC outputs.
 - `main/servo_output.c`: independent 50 Hz steering PWM on GPIO32.
-- `main/steering_center_guard.c`: distinct-frame neutral steering validation
-  and rejected-spike telemetry.
+- `main/steering_input_filter.c`: full-range distinct-frame median rejection
+  and isolated-spike telemetry.
 - `main/steering_curve.c`: source-backed 45-point LF/RF road-wheel curve and
   deterministic piecewise-linear interpolation.
 - `main/rpm_sensor.c`: four PCNT units, rolling windows, and RPM conversion.
@@ -625,10 +625,10 @@ These are requirements, not suggestions:
   requires independent, immediately accessible traction-power isolation.
 - Receiver throttle loss or calibration timeout restores safe outputs. An
   enabled configured throttle-pulse detector does the same when it matches.
-- The steering output starts centered, follows only valid CH1 pulses within
-  calibrated endpoints after the two-frame neutral-release guard, and centers
-  on CH1 loss. It also centers on a matching throttle pulse when the optional
-  detector is enabled.
+- The steering output starts centered, follows the three-distinct-frame median
+  of valid CH1 pulses within calibrated endpoints, and centers on CH1 loss. It
+  also centers on a matching throttle pulse when the optional detector is
+  enabled.
 - Rearming after a safety event requires a healthy STOP/OFF-to-RUN/ON cycle and does
   not require a laptop.
 - Reverse magnitude remains limited by configuration, default 10 percent.

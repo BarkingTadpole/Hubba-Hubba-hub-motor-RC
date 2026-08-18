@@ -9,7 +9,7 @@ idf_component_register(
         "rc_input.c"
         "rpm_sensor.c"
         "servo_output.c"
-        "steering_center_guard.c"
+        "steering_input_filter.c"
         "steering_curve.c"
         "torque_vectoring.c"
     PRIV_REQUIRES

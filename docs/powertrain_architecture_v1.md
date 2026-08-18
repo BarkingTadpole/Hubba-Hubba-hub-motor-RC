@@ -165,17 +165,18 @@ The servo starts at the saved steering center, follows valid CH1 commands at
 50 Hz, clamps commands to the calibrated left/right endpoints, and applies
 the steering deadband at center. A configurable first-order command filter
 smooths valid requests; its default time constant is `60 ms` and `0 ms`
-disables it. Before smoothing, a neutral guard rejects isolated CH1 frames
-outside the center deadband. It releases only after two distinct consecutive
-receiver frames lie on the same side of center, adding approximately one
-`20 ms` receiver frame when steering begins. Once released, off-center
-steering follows the existing path without additional confirmation. The first
-in-deadband frame commands center and two consecutive centered frames relock
-the guard. Missing CH1, the configured throttle failsafe, startup, and a new
-steering calibration immediately recenter it. `status` and
-`monitor steering` expose `locked`, `pending-low`, `pending-high`, or
-`tracking` plus a rejected-spike counter. The saved trim is applied after the
-guard and before filtering and is limited to
+disables it. Before smoothing, a median filter uses the latest three distinct
+receiver frames and rejects one isolated valid-looking pulse anywhere in the
+steering range. A monotonic or stepped real command emerges one receiver frame
+later, adding approximately `20 ms` of continuous, predictable latency.
+Startup, missing CH1, the configured throttle failsafe, and a new steering
+calibration clear its history and hold the saved center until three new frames
+arrive, normally `40-60 ms`. Repeated powertrain-loop reads of the same
+receiver timestamp do not advance the history. `status` and
+`monitor steering` expose the raw pulse, current median, `warmup` or `active`
+state, and a count of confirmed isolated spikes whose neighboring frames
+returned within the steering deadband. The saved trim is applied after the
+median filter and before the first-order command filter and is limited to
 `+/-15 degrees` on a nominal `1000 us = 90 degrees` servo-command scale. This
 is command-space trim, not a claim about measured road-wheel angle. Both trim
 and filtered output remain clamped to the learned endpoints. A trim command is
@@ -638,8 +639,8 @@ at low speed, starting with authority at 2 to 5 percent.
   interrupts on CPU0.
 - `esc_output.c`: generates eight independent 50 Hz LEDC outputs.
 - `servo_output.c`: generates the independent 50 Hz GPIO32 steering output.
-- `steering_center_guard.c`: rejects isolated frames while steering is
-  centered and validates departure using distinct receiver timestamps.
+- `steering_input_filter.c`: applies full-range three-frame median rejection
+  using distinct receiver timestamps.
 - `steering_curve.c`: interpolates the supplied 45-point LF/RF road-wheel
   curves and converts their sign convention for controller use.
 - `rpm_sensor.c`: owns four hardware PCNT units and RPM conversion.

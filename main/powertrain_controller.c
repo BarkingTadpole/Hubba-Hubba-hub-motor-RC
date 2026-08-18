@@ -21,8 +21,8 @@
 #include "rc_input.h"
 #include "rpm_sensor.h"
 #include "servo_output.h"
-#include "steering_center_guard.h"
 #include "steering_curve.h"
+#include "steering_input_filter.h"
 #include "torque_vectoring.h"
 
 #define ESC_THROTTLE_MIN_US 1100
@@ -100,7 +100,7 @@ static UBaseType_t sensor_stack_min_free_bytes;
 static UBaseType_t powertrain_stack_min_free_bytes;
 static int32_t steering_filtered_q16;
 static bool steering_filter_initialized;
-static steering_center_guard_t steering_center_guard;
+static steering_input_filter_t steering_input_filter;
 
 static void controller_lock(void)
 {
@@ -178,14 +178,12 @@ static const char *tv_mode_name(tv_mode_t mode)
     }
 }
 
-static const char *steering_center_guard_status_name(
-    steering_center_guard_status_t status)
+static const char *steering_input_filter_status_name(
+    steering_input_filter_status_t status)
 {
     switch (status) {
-    case STEERING_CENTER_GUARD_LOCKED: return "locked";
-    case STEERING_CENTER_GUARD_PENDING_LOW: return "pending-low";
-    case STEERING_CENTER_GUARD_PENDING_HIGH: return "pending-high";
-    case STEERING_CENTER_GUARD_TRACKING: return "tracking";
+    case STEERING_INPUT_FILTER_WARMUP: return "warmup";
+    case STEERING_INPUT_FILTER_ACTIVE: return "active";
     default: return "unknown";
     }
 }
@@ -291,31 +289,32 @@ static void update_steering_servo(void)
 
     if (!throttle_matches_failsafe() &&
         rc_input_get(RC_CHANNEL_STEERING, &sample)) {
+        uint16_t filtered_input_us = steering_cal.center_us;
+        bool filter_valid = steering_input_filter_update(&steering_input_filter,
+                                                         sample.pulse_us,
+                                                         steering_cal.deadband_us,
+                                                         sample.updated_at_us,
+                                                         &filtered_input_us);
         uint16_t minimum_us = steering_cal.left_us < steering_cal.right_us
                                   ? steering_cal.left_us
                                   : steering_cal.right_us;
         uint16_t maximum_us = steering_cal.left_us > steering_cal.right_us
                                   ? steering_cal.left_us
                                   : steering_cal.right_us;
-        int32_t center_delta = (int32_t)sample.pulse_us - steering_cal.center_us;
+        int32_t center_delta = (int32_t)filtered_input_us - steering_cal.center_us;
 
-        bool accept_input = steering_center_guard_accept(&steering_center_guard,
-                                                         sample.pulse_us,
-                                                         steering_cal.center_us,
-                                                         steering_cal.deadband_us,
-                                                         sample.updated_at_us);
-        if (!accept_input || abs(center_delta) <= steering_cal.deadband_us) {
+        if (!filter_valid || abs(center_delta) <= steering_cal.deadband_us) {
             target_us = steering_cal.center_us;
-        } else if (sample.pulse_us < minimum_us) {
+        } else if (filtered_input_us < minimum_us) {
             target_us = minimum_us;
-        } else if (sample.pulse_us > maximum_us) {
+        } else if (filtered_input_us > maximum_us) {
             target_us = maximum_us;
         } else {
-            target_us = sample.pulse_us;
+            target_us = filtered_input_us;
         }
         input_valid = true;
     } else {
-        steering_center_guard_recenter(&steering_center_guard);
+        steering_input_filter_reset(&steering_input_filter);
     }
 
     target_us = clamp_steering_pulse((int32_t)target_us + steering_trim_us());
@@ -951,7 +950,7 @@ void powertrain_calibrate_steering(void)
                    trim_err == ESP_OK ? "" : esp_err_to_name(trim_err));
         }
         steering_filtered_q16 = (int32_t)trimmed_steering_center_us() << 16;
-        steering_center_guard_recenter(&steering_center_guard);
+        steering_input_filter_reset(&steering_input_filter);
         servo_output_set_pulse(trimmed_steering_center_us());
     } else if (center && left && right) {
         printf("ERR: steering endpoints must be at least 150 us from opposite sides of center\n");
@@ -1449,7 +1448,8 @@ void powertrain_print_status(void)
     tv_mode_t requested_mode;
     bool arm_run = false;
     bool arm_valid;
-    steering_center_guard_status_t steering_guard_status;
+    steering_input_filter_status_t steering_filter_status;
+    uint16_t steering_filter_output_us;
     uint32_t steering_rejected_spikes;
 
     controller_lock();
@@ -1468,8 +1468,9 @@ void powertrain_print_status(void)
     steering_geometry = steering_geometry_sample();
     requested_mode = requested_tv_mode();
     arm_valid = arm_channel_state(&arm_run);
-    steering_guard_status = steering_center_guard_status(&steering_center_guard);
-    steering_rejected_spikes = steering_center_guard.rejected_spike_count;
+    steering_filter_status = steering_input_filter_status(&steering_input_filter);
+    steering_filter_output_us = steering_input_filter.output_us;
+    steering_rejected_spikes = steering_input_filter.rejected_spike_count;
     esc_output_get(&outputs);
     if (rpm_initialized) rpm_sensor_get_snapshot(&rpm);
     if (imu_initialized) imu_sensor_get_snapshot(&imu);
@@ -1497,9 +1498,16 @@ void powertrain_print_status(void)
     print_channel("steering", RC_CHANNEL_STEERING);
     printf("  steering servo: GPIO%d, output=%u us\n",
            PIN_STEERING_SERVO_OUTPUT, servo_pulse_us);
-    printf("  steering center guard: %s, rejected neutral spikes=%lu\n",
-           steering_center_guard_status_name(steering_guard_status),
-           (unsigned long)steering_rejected_spikes);
+    if (steering_filter_status == STEERING_INPUT_FILTER_ACTIVE) {
+        printf("  steering input filter: active, median=%u us, "
+               "rejected full-range spikes=%lu\n",
+               steering_filter_output_us,
+               (unsigned long)steering_rejected_spikes);
+    } else {
+        printf("  steering input filter: warmup, median=unavailable, "
+               "rejected full-range spikes=%lu\n",
+               (unsigned long)steering_rejected_spikes);
+    }
     printf("  loop timing: sensor max=%lu/%u us overruns=%lu, "
            "powertrain max=%lu/%u us overruns=%lu\n",
            (unsigned long)sensor_max_us, SENSOR_UPDATE_INTERVAL_MS * 1000,
@@ -1613,21 +1621,29 @@ void powertrain_monitor_steering(void)
         rc_channel_sample_t sample;
         steering_curve_sample_t geometry = steering_geometry_sample();
         controller_lock();
-        steering_center_guard_status_t guard_status =
-            steering_center_guard_status(&steering_center_guard);
-        uint32_t rejected_spikes = steering_center_guard.rejected_spike_count;
+        steering_input_filter_status_t filter_status =
+            steering_input_filter_status(&steering_input_filter);
+        uint16_t filter_output_us = steering_input_filter.output_us;
+        uint32_t rejected_spikes = steering_input_filter.rejected_spike_count;
         controller_unlock();
         if (rc_input_get(RC_CHANNEL_STEERING, &sample)) {
-            printf("steering: input=%u us output=%u us servo=%+.2f deg "
+            char median_text[24];
+            if (filter_status == STEERING_INPUT_FILTER_ACTIVE) {
+                snprintf(median_text, sizeof(median_text),
+                         "%u us", filter_output_us);
+            } else {
+                snprintf(median_text, sizeof(median_text), "unavailable");
+            }
+            printf("steering: input=%u us median=%s output=%u us servo=%+.2f deg "
                    "LF=%+.2f deg RF=%+.2f deg average=%+.2f deg normalized=%+.3f "
-                   "guard=%s rejected=%lu%s%s\n",
-                   sample.pulse_us, servo_output_get_pulse(),
+                   "filter=%s rejected=%lu%s%s\n",
+                   sample.pulse_us, median_text, servo_output_get_pulse(),
                    geometry.servo_command_deg,
                    geometry.left_wheel_deg,
                    geometry.right_wheel_deg,
                    geometry.average_wheel_deg,
                    geometry.normalized_average,
-                   steering_center_guard_status_name(guard_status),
+                   steering_input_filter_status_name(filter_status),
                    (unsigned long)rejected_spikes,
                    geometry.valid ? "" : " invalid",
                    geometry.saturated ? " saturated" : "");
@@ -1881,7 +1897,7 @@ esp_err_t powertrain_controller_init(void)
     config_store_load_arm(&arm_cal);
     config_store_load_tv_mode(&tv_mode_cal);
     config_store_load_drive(&drive_config);
-    steering_center_guard_init(&steering_center_guard);
+    steering_input_filter_init(&steering_input_filter);
     if (!steering_trim_fits_endpoints(drive_config.steering_trim_tenths_deg)) {
         ESP_LOGW(TAG, "Stored steering trim does not fit calibrated endpoints; using zero trim");
         drive_config.steering_trim_tenths_deg = 0;

@@ -22,13 +22,13 @@ python tests\host\run_rv32_unicorn.py `
   build\host_tests\test_steering_curve.elf
 
 clang -std=c11 -Wall -Wextra -Werror -I main\include `
-  main\steering_center_guard.c tests\host\test_steering_center_guard.c `
-  -o build\host_tests\test_steering_center_guard.elf
+  main\steering_input_filter.c tests\host\test_steering_input_filter.c `
+  -o build\host_tests\test_steering_input_filter.elf
 python tests\host\run_rv32_unicorn.py `
-  build\host_tests\test_steering_center_guard.elf
+  build\host_tests\test_steering_input_filter.elf
 ```
 
 Keep Python dependencies outside the source tree or under ignored `build/`.
-These tests cover pure control, interpolation, and neutral steering-guard logic
-only; they do not exercise ESP32 peripherals, FreeRTOS scheduling, receiver
-safety behavior, or the car.
+These tests cover pure control, interpolation, and full-range steering-filter
+logic only; they do not exercise ESP32 peripherals, FreeRTOS scheduling,
+receiver safety behavior, or the car.
