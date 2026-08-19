@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.c"
         "cli.c"
         "config_store.c"
+        "cornering_control.c"
         "esc_output.c"
         "imu_sensor.c"
         "powertrain_controller.c"

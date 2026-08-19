@@ -152,12 +152,31 @@ static void handle_command(char *line)
         } else {
             powertrain_set_steering_smoothing((uint16_t)smoothing_ms);
         }
+    } else if (strcmp(line, "config steering speed-limit on") == 0) {
+        powertrain_set_steering_speed_limit_enabled(true);
+    } else if (strcmp(line, "config steering speed-limit off") == 0) {
+        powertrain_set_steering_speed_limit_enabled(false);
+    } else if (strncmp(line, "config steering lateral-g ", 26) == 0) {
+        float lateral_accel_g = 0.0f;
+        char extra = '\0';
+        if (sscanf(line + 26, "%f %c", &lateral_accel_g, &extra) != 1) {
+            printf("ERR: usage is 'config steering lateral-g <0.2-3.0>'\n");
+        } else {
+            powertrain_set_steering_lateral_accel(lateral_accel_g);
+        }
     } else if (strncmp(line, "config tv authority ", 20) == 0) {
         unsigned long percent = 0;
         if (!parse_unsigned(line + 20, &percent) || percent > 255) {
             printf("ERR: usage is 'config tv authority <0-25>'\n");
         } else {
             powertrain_set_tv_authority((uint8_t)percent);
+        }
+    } else if (strncmp(line, "config tv front-relief ", 23) == 0) {
+        unsigned long percent = 0;
+        if (!parse_unsigned(line + 23, &percent) || percent > 255) {
+            printf("ERR: usage is 'config tv front-relief <0-50>'\n");
+        } else {
+            powertrain_set_tv_front_relief((uint8_t)percent);
         }
     } else if (strncmp(line, "config tv gains ", 16) == 0) {
         float yaw_gain = 0.0f;

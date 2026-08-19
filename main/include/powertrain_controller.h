@@ -20,8 +20,11 @@ void powertrain_set_motor_poles(uint8_t poles);
 void powertrain_set_rpm_pulses_per_revolution(uint16_t pulses_per_revolution);
 bool powertrain_set_steering_trim(float trim_degrees);
 void powertrain_set_steering_smoothing(uint16_t smoothing_ms);
+void powertrain_set_steering_speed_limit_enabled(bool enabled);
+void powertrain_set_steering_lateral_accel(float lateral_accel_g);
 void powertrain_set_tv_enabled(bool enabled);
 void powertrain_set_tv_authority(uint8_t percent);
+void powertrain_set_tv_front_relief(uint8_t percent);
 void powertrain_set_tv_gains(float yaw_gain_dps,
                              float turn_rpm_gain,
                              float yaw_kp,

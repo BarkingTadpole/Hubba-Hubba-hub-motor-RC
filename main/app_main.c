@@ -3,6 +3,7 @@
 #include "cli.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "powertrain_controller.h"
@@ -13,6 +14,9 @@ void app_main(void)
 {
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    ESP_LOGI(TAG, "Boot started (reset reason %d); IMU calibration runs once during this boot",
+             (int)esp_reset_reason());
 
     esp_err_t err = powertrain_controller_init();
     if (err != ESP_OK) {

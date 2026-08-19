@@ -261,7 +261,12 @@ neutral, full throttle, full reverse, and polarity.
   linear interpolation between bounding samples. The centered source values
   `LF=+1.64` and `RF=+1.64 degrees` describe toe-out; runtime values are
   `LF=-1.64`, `RF=+1.64`, and zero mean. The curve shapes the torque-vectoring
-  steering input only; it never changes servo pass-through.
+  input and provides the inverse lookup for speed-sensitive steering limits.
+- Speed-sensitive steering is enabled by default. It uses average rear RPM,
+  a `107 mm` wheel diameter, `445 mm` wheelbase, and a configurable `1.0 g`
+  default lateral-acceleration ceiling. The supplied `320 mm` track width is
+  retained as vehicle geometry reference. A temporary rear-RPM dropout while
+  armed retains the last valid speed instead of restoring full steering.
 
 CH4 is a three-position receiver shutdown control with one learned RUN/ON
 position and two learned STOP/OFF positions. Arming requires:
@@ -449,9 +454,12 @@ Default configuration:
 - Side-RPM proportional gain: `0.20`.
 - IMU yaw sign: `1`.
 
-Corrections are equal and opposite to preserve requested mean power. Available
-authority naturally falls near zero and full throttle because both sides must
-stay inside the ESC output limits. The yaw integrator is conditionally held
+Left/right side corrections are equal and opposite. In FULL mode only,
+front-axle relief additionally subtracts up to 20 percent of full ESC span
+from both front motors in proportion to predicted lateral demand. That power
+is not transferred rearward, so mean requested power intentionally falls while
+relief is active. Available side authority naturally falls near zero and full
+throttle because both sides must stay inside the ESC output limits. The yaw integrator is conditionally held
 when saturation and error would wind it farther into the limit. Non-finite
 configuration/input values, raw RPM below 16.7 Hz, or invalid/stale sensors
 reset the controller and produce equal outputs.
@@ -545,7 +553,10 @@ monitor vector
 ```
 
 Monitoring blocks the serial CLI temporarily but does not stop the controller
-or sensor tasks. Steering setup requires a verified trim value in the NVS
+or sensor tasks. `monitor imu` is read-only and never starts calibration.
+Attaching a serial monitor that toggles DTR/RTS can reset the devkit; the new
+boot then correctly repeats the five-second startup calibration. Steering
+setup requires a verified trim value in the NVS
 drive configuration; `0.0 degrees` is valid if no correction is needed.
 `monitor steering trim <degrees>` is accepted only while disarmed, saves the
 validated trim to NVS, waits for it to be applied, and then starts the normal
@@ -560,7 +571,10 @@ config rpm poles <even 2-60>
 config rpm ppr <1-120>
 config steering trim <-15..15>
 config steering smoothing <0-500>
+config steering speed-limit <on|off>
+config steering lateral-g <0.2-3.0>
 config tv authority <0-25>
+config tv front-relief <0-50>
 config tv gains <yaw_gain_dps> <turn_rpm_gain> <yaw_kp> <yaw_ki> <rpm_kp>
 config imu yaw-sign <-1|1>
 tv enable
@@ -578,6 +592,8 @@ Configuration changes are accepted only while disarmed and persist in NVS.
   reference.
 - `main/config_store.c`: defaults, validation, backward-compatible NVS keys,
   and persistence.
+- `main/cornering_control.c`: RPM-derived speed, steering envelope, and
+  predicted lateral demand.
 - `main/rc_input.c`: four priority-3 GPIO edge-interrupt PWM inputs.
 - `main/esc_output.c`: eight independent 50 Hz LEDC outputs.
 - `main/servo_output.c`: independent 50 Hz steering PWM on GPIO32.
@@ -626,9 +642,9 @@ These are requirements, not suggestions:
 - Receiver throttle loss or calibration timeout restores safe outputs. An
   enabled configured throttle-pulse detector does the same when it matches.
 - The steering output starts centered, follows the three-distinct-frame median
-  of valid CH1 pulses within calibrated endpoints, and centers on CH1 loss. It
-  also centers on a matching throttle pulse when the optional detector is
-  enabled.
+  of valid CH1 pulses within calibrated endpoints and the speed-sensitive
+  steering envelope, and centers on CH1 loss. It also centers on a matching
+  throttle pulse when the optional detector is enabled.
 - Rearming after a safety event requires a healthy STOP/OFF-to-RUN/ON cycle and does
   not require a laptop.
 - Reverse magnitude remains limited by configuration, default 10 percent.
@@ -665,8 +681,8 @@ standalone `tools/esp32_pin_map/open_pin_map.ps1` launcher regenerates and
 opens the same artifact without building firmware.
 
 The modular firmware was last confirmed to compile with ESP-IDF 6.0.1 for
-`esp32` on 2026-08-12. The recorded application binary was `0x37720` bytes
-with 78 percent of the 1 MiB application partition free. Treat size figures as
+`esp32` on 2026-08-19. The recorded application binary was `0x39f40` bytes
+with 77 percent of the 1 MiB application partition free. Treat size figures as
 a historical baseline and report current build output after new changes.
 
 Host tests cover balanced correction, the RPM frequency guard, non-finite
@@ -681,8 +697,9 @@ Required bench-test progression for major control changes:
 
 1. Traction power disconnected; inspect all nine outputs with a scope or
    signal tester.
-2. Calibrate and monitor all receiver inputs and verify the GPIO32 servo
-   output follows CH1 and centers on signal loss.
+2. Calibrate and monitor all receiver inputs; verify the GPIO32 servo output
+   follows CH1, centers on signal loss, and respects the RPM-derived steering
+   limit while both rear wheels are spun together.
 3. Verify both CH4 STOP/OFF positions and receiver-loss behavior from every
    relevant state.
 4. Calibrate and test one ESC/motor before all four.
@@ -756,6 +773,12 @@ The following must remain visible until physically resolved:
   trim, smoothing, wheel-local curve signs, centered toe-out, and road-wheel
   angles also require scope and on-car validation. The supplied curve is input
   data, not physical validation observed by the firmware review.
+- Speed-sensitive steering and FULL-mode front torque relief have host-test
+  and build validation only. With traction power disconnected, spin both rear
+  wheels together and verify reported speed, decreasing steering limit, servo
+  output, and front-relief telemetry before conservative low-speed road tests.
+  These controls reduce demand but cannot correct a mechanical Ackermann or
+  toe error that makes the front tires scrub at a given steering angle.
 - The CPU-isolated GPIO receiver capture and high-speed LEDC ESC output
   rollback and the 2026-08-11 LEDC fade-service startup fix compile but still
   require traction-disconnected validation while changing throttle and

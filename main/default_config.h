@@ -23,6 +23,14 @@
 #define DEFAULT_RC_ARM_STOP_2_US 1515U
 #define DEFAULT_RC_ARM_POSITION_WINDOW_US 125U
 
+/* Measured vehicle geometry and conservative initial cornering limits. */
+#define DEFAULT_WHEEL_DIAMETER_M 0.107f
+#define DEFAULT_WHEELBASE_M 0.445f
+#define DEFAULT_TRACK_WIDTH_M 0.320f
+#define DEFAULT_STEERING_SPEED_LIMIT_ENABLED 1U
+#define DEFAULT_STEERING_LATERAL_ACCEL_G 1.0f
+#define DEFAULT_TV_FRONT_RELIEF_PERCENT 20U
+
 /* Physical IMU mounting reference; yaw polarity remains runtime-configurable. */
 #define IMU_MOUNT_X_POSITIVE_DIRECTION "rearward"
 #define IMU_MOUNT_Y_POSITIVE_DIRECTION "right"

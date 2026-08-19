@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "cornering_control.h"
+#include "default_config.h"
+
 #define RPM_MIN_CONTROL_FREQUENCY_HZ 16.7f
 
 static float clampf(float value, float minimum, float maximum)
@@ -31,7 +34,8 @@ static bool finite_config(const drive_config_t *config)
            isfinite(config->tv_turn_rpm_gain) &&
            isfinite(config->tv_yaw_kp) &&
            isfinite(config->tv_yaw_ki) &&
-           isfinite(config->tv_rpm_kp);
+           isfinite(config->tv_rpm_kp) &&
+           isfinite(config->steering_lateral_accel_g);
 }
 
 void torque_vectoring_reset(torque_vectoring_state_t *state)
@@ -55,12 +59,18 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
 
     if (!finite_config(config) || !isfinite(input->base_throttle) ||
         !isfinite(input->steering) || !isfinite(input->dt_seconds) ||
+        !isfinite(input->vehicle_speed_mps) ||
+        !isfinite(input->average_wheel_angle_deg) ||
         !isfinite(input->imu.yaw_rate_dps)) {
         set_inactive(state, output, "controller input or configuration is non-finite");
         return;
     }
     if (input->base_throttle < 0.0f || input->base_throttle > 1.0f ||
         input->steering < -1.0f || input->steering > 1.0f ||
+        input->vehicle_speed_mps < 0.0f ||
+        config->steering_lateral_accel_g < 0.2f ||
+        config->steering_lateral_accel_g > 3.0f ||
+        config->tv_front_relief_percent > 50 ||
         input->dt_seconds <= 0.0f || input->dt_seconds > 0.1f) {
         set_inactive(state, output, "controller input is outside its valid range");
         return;
@@ -107,6 +117,10 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
     float right_rpm = (input->rpm.rpm[WHEEL_FRONT_RIGHT] +
                        input->rpm.rpm[WHEEL_REAR_RIGHT]) * 0.5f;
     float average_rpm = (left_rpm + right_rpm) * 0.5f;
+    if (average_rpm <= 0.0f) {
+        set_inactive(state, output, "average wheel speed is zero");
+        return;
+    }
     float target_yaw_rate_dps = 0.0f;
     float desired_side_rpm_delta = 0.0f;
     if (input->requested_mode == TV_MODE_FULL) {
@@ -158,13 +172,37 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
                             (config->tv_yaw_ki * state->yaw_integral);
     side_correction = clampf(side_correction, -balanced_limit, balanced_limit);
 
-    output->wheel_correction[WHEEL_FRONT_LEFT] = side_correction;
+    float predicted_lateral_accel_mps2 = 0.0f;
+    float lateral_demand = 0.0f;
+    float front_relief = 0.0f;
+    if (input->requested_mode == TV_MODE_FULL) {
+        lateral_demand = cornering_lateral_demand(
+            input->vehicle_speed_mps,
+            input->average_wheel_angle_deg,
+            DEFAULT_WHEELBASE_M,
+            config->steering_lateral_accel_g,
+            &predicted_lateral_accel_mps2);
+        front_relief = ((float)config->tv_front_relief_percent / 100.0f) *
+                       lateral_demand;
+        if (front_relief > input->base_throttle) {
+            front_relief = input->base_throttle;
+        }
+    }
+
+    output->wheel_correction[WHEEL_FRONT_LEFT] =
+        clampf(side_correction - front_relief,
+               -input->base_throttle, 1.0f - input->base_throttle);
     output->wheel_correction[WHEEL_REAR_LEFT] = side_correction;
-    output->wheel_correction[WHEEL_FRONT_RIGHT] = -side_correction;
+    output->wheel_correction[WHEEL_FRONT_RIGHT] =
+        clampf(-side_correction - front_relief,
+               -input->base_throttle, 1.0f - input->base_throttle);
     output->wheel_correction[WHEEL_REAR_RIGHT] = -side_correction;
     output->target_yaw_rate_dps = target_yaw_rate_dps;
     output->yaw_error_dps = yaw_error_dps;
     output->side_rpm_error = side_rpm_error;
+    output->predicted_lateral_accel_mps2 = predicted_lateral_accel_mps2;
+    output->lateral_demand = lateral_demand;
+    output->front_relief = front_relief;
     output->active_mode = input->requested_mode;
     output->active = true;
     output->inactive_reason = "active";

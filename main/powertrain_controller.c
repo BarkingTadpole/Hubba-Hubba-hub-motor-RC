@@ -6,6 +6,7 @@
 #include <stdlib.h>
 
 #include "config_store.h"
+#include "cornering_control.h"
 #include "default_config.h"
 #include "driver/gpio.h"
 #include "esc_output.h"
@@ -101,6 +102,16 @@ static UBaseType_t powertrain_stack_min_free_bytes;
 static int32_t steering_filtered_q16;
 static bool steering_filter_initialized;
 static steering_input_filter_t steering_input_filter;
+
+typedef struct {
+    bool speed_valid;
+    bool steering_limited;
+    float vehicle_speed_mps;
+    float requested_average_wheel_deg;
+    float maximum_average_wheel_deg;
+} steering_limit_telemetry_t;
+
+static steering_limit_telemetry_t steering_limit_telemetry;
 
 static void controller_lock(void)
 {
@@ -230,6 +241,112 @@ static bool pulse_is_on_endpoint_side(uint16_t pulse_us,
            ((pulse_delta > 0) == (endpoint_delta > 0));
 }
 
+static float steering_pulse_to_servo_command_deg(uint16_t pulse_us)
+{
+    uint16_t center_us = trimmed_steering_center_us();
+    int32_t delta = (int32_t)pulse_us - center_us;
+    if (abs(delta) <= 1) {
+        return 0.0f;
+    }
+
+    bool right = pulse_is_on_endpoint_side(pulse_us,
+                                           steering_cal.right_us,
+                                           center_us);
+    float command_deg = (float)abs(delta) *
+                        (90.0f / SERVO_NOMINAL_US_PER_90_DEG);
+    return right ? command_deg : -command_deg;
+}
+
+static uint16_t steering_servo_command_deg_to_pulse(float command_deg)
+{
+    if (!isfinite(command_deg)) {
+        return trimmed_steering_center_us();
+    }
+    if (command_deg > 45.0f) command_deg = 45.0f;
+    if (command_deg < -45.0f) command_deg = -45.0f;
+
+    uint16_t center_us = trimmed_steering_center_us();
+    uint16_t endpoint_us = command_deg >= 0.0f
+                               ? steering_cal.right_us
+                               : steering_cal.left_us;
+    int32_t direction = endpoint_us >= center_us ? 1 : -1;
+    int32_t delta_us = (int32_t)lroundf(fabsf(command_deg) *
+                                        (SERVO_NOMINAL_US_PER_90_DEG / 90.0f));
+    return clamp_steering_pulse((int32_t)center_us + direction * delta_us);
+}
+
+static bool update_vehicle_speed_estimate(float *speed_mps)
+{
+    rpm_snapshot_t rpm = {0};
+    float measured_speed_mps = 0.0f;
+    bool measured = false;
+    if (rpm_initialized) {
+        rpm_sensor_get_snapshot(&rpm);
+        measured = cornering_vehicle_speed_from_rear_rpm(
+            &rpm, DEFAULT_WHEEL_DIAMETER_M, &measured_speed_mps);
+    }
+
+    if (measured) {
+        steering_limit_telemetry.speed_valid = true;
+        steering_limit_telemetry.vehicle_speed_mps = measured_speed_mps;
+    } else if (system_state != SYSTEM_DRIVE_ARMED) {
+        steering_limit_telemetry.speed_valid = false;
+        steering_limit_telemetry.vehicle_speed_mps = 0.0f;
+    }
+
+    *speed_mps = steering_limit_telemetry.vehicle_speed_mps;
+    return steering_limit_telemetry.speed_valid;
+}
+
+static uint16_t apply_speed_steering_limit(uint16_t requested_us)
+{
+    float requested_servo_deg = steering_pulse_to_servo_command_deg(requested_us);
+    steering_curve_sample_t requested_geometry = {0};
+    if (!steering_curve_sample(requested_servo_deg, &requested_geometry)) {
+        steering_limit_telemetry.steering_limited = false;
+        steering_limit_telemetry.requested_average_wheel_deg = 0.0f;
+        steering_limit_telemetry.maximum_average_wheel_deg = 0.0f;
+        return requested_us;
+    }
+
+    float speed_mps = 0.0f;
+    bool speed_valid = update_vehicle_speed_estimate(&speed_mps);
+    steering_curve_sample_t endpoint_geometry = {0};
+    float endpoint_servo_deg = requested_geometry.average_wheel_deg < 0.0f
+                                   ? -45.0f
+                                   : 45.0f;
+    steering_curve_sample(endpoint_servo_deg, &endpoint_geometry);
+    float physical_max_angle_deg = fabsf(endpoint_geometry.average_wheel_deg);
+    float maximum_angle_deg = physical_max_angle_deg;
+
+    if (drive_config.steering_speed_limit_enabled && speed_valid) {
+        maximum_angle_deg = cornering_max_average_wheel_angle_deg(
+            speed_mps,
+            DEFAULT_WHEELBASE_M,
+            drive_config.steering_lateral_accel_g,
+            physical_max_angle_deg);
+    }
+
+    steering_limit_telemetry.requested_average_wheel_deg =
+        requested_geometry.average_wheel_deg;
+    steering_limit_telemetry.maximum_average_wheel_deg = maximum_angle_deg;
+    steering_limit_telemetry.steering_limited =
+        drive_config.steering_speed_limit_enabled && speed_valid &&
+        fabsf(requested_geometry.average_wheel_deg) > maximum_angle_deg;
+    if (!steering_limit_telemetry.steering_limited) {
+        return requested_us;
+    }
+
+    float limited_average_deg = copysignf(maximum_angle_deg,
+                                          requested_geometry.average_wheel_deg);
+    float limited_servo_deg = 0.0f;
+    if (!steering_curve_servo_for_average(limited_average_deg,
+                                          &limited_servo_deg)) {
+        return requested_us;
+    }
+    return steering_servo_command_deg_to_pulse(limited_servo_deg);
+}
+
 static bool throttle_sample(rc_channel_sample_t *sample)
 {
     return rc_input_get(RC_CHANNEL_THROTTLE, sample);
@@ -318,6 +435,7 @@ static void update_steering_servo(void)
     }
 
     target_us = clamp_steering_pulse((int32_t)target_us + steering_trim_us());
+    target_us = apply_speed_steering_limit(target_us);
     int32_t target_q16 = (int32_t)target_us << 16;
     if (!input_valid || drive_config.steering_smoothing_ms == 0 ||
         !steering_filter_initialized) {
@@ -415,22 +533,8 @@ static steering_curve_sample_t steering_geometry_sample(void)
         return geometry;
     }
 
-    uint16_t applied_us = servo_output_get_pulse();
-    uint16_t center_us = trimmed_steering_center_us();
-    int32_t delta = (int32_t)applied_us - center_us;
-    if (abs(delta) <= 1) {
-        steering_curve_sample(0.0f, &geometry);
-        return geometry;
-    }
-
-    bool right = pulse_is_on_endpoint_side(applied_us,
-                                           steering_cal.right_us,
-                                           center_us);
-    float servo_command_deg = (float)abs(delta) *
-                              (90.0f / SERVO_NOMINAL_US_PER_90_DEG);
-    if (!right) {
-        servo_command_deg = -servo_command_deg;
-    }
+    float servo_command_deg = steering_pulse_to_servo_command_deg(
+        servo_output_get_pulse());
     steering_curve_sample(servo_command_deg, &geometry);
     return geometry;
 }
@@ -606,12 +710,19 @@ static void set_drive_outputs_with_vectoring(void)
     if (imu_initialized) {
         imu_sensor_get_snapshot(&imu);
     }
+    steering_curve_sample_t geometry = steering_geometry_sample();
 
     torque_vectoring_input_t input = {
         .requested_mode = requested_tv_mode(),
         .direction = active_direction,
         .base_throttle = base_throttle,
         .steering = steering_normalized(),
+        .vehicle_speed_mps = steering_limit_telemetry.speed_valid
+                                 ? steering_limit_telemetry.vehicle_speed_mps
+                                 : 0.0f,
+        .average_wheel_angle_deg = geometry.valid
+                                       ? geometry.average_wheel_deg
+                                       : 0.0f,
         .rpm = rpm,
         .imu = imu,
         .dt_seconds = (float)DRIVE_UPDATE_INTERVAL_MS / 1000.0f,
@@ -1317,6 +1428,39 @@ void powertrain_set_steering_smoothing(uint16_t smoothing_ms)
     controller_unlock();
 }
 
+void powertrain_set_steering_speed_limit_enabled(bool enabled)
+{
+    controller_lock();
+    if (system_state != SYSTEM_DISARMED) {
+        printf("ERR: steering speed limiting can only be changed while DISARMED\n");
+        controller_unlock();
+        return;
+    }
+    drive_config.steering_speed_limit_enabled = enabled;
+    save_drive_config_or_report(enabled
+                                    ? "OK: speed-sensitive steering limit enabled"
+                                    : "OK: speed-sensitive steering limit disabled");
+    controller_unlock();
+}
+
+void powertrain_set_steering_lateral_accel(float lateral_accel_g)
+{
+    controller_lock();
+    if (system_state != SYSTEM_DISARMED || !isfinite(lateral_accel_g) ||
+        lateral_accel_g < 0.2f || lateral_accel_g > 3.0f) {
+        printf("ERR: steering lateral acceleration must be 0.2-3.0 g while DISARMED\n");
+        controller_unlock();
+        return;
+    }
+    drive_config.steering_lateral_accel_g = lateral_accel_g;
+    char message[96];
+    snprintf(message, sizeof(message),
+             "OK: steering lateral-acceleration ceiling set to %.2f g",
+             (double)lateral_accel_g);
+    save_drive_config_or_report(message);
+    controller_unlock();
+}
+
 void powertrain_set_tv_enabled(bool enabled)
 {
     controller_lock();
@@ -1373,6 +1517,22 @@ void powertrain_set_tv_authority(uint8_t percent)
     drive_config.tv_authority_percent = percent;
     char message[80];
     snprintf(message, sizeof(message), "OK: vectoring authority set to +/- %u%%", percent);
+    save_drive_config_or_report(message);
+    controller_unlock();
+}
+
+void powertrain_set_tv_front_relief(uint8_t percent)
+{
+    controller_lock();
+    if (system_state != SYSTEM_DISARMED || percent > 50) {
+        printf("ERR: front torque relief must be 0-50 percent while DISARMED\n");
+        controller_unlock();
+        return;
+    }
+    drive_config.tv_front_relief_percent = percent;
+    char message[96];
+    snprintf(message, sizeof(message),
+             "OK: FULL-mode front torque relief set to %u%%", percent);
     save_drive_config_or_report(message);
     controller_unlock();
 }
@@ -1451,6 +1611,7 @@ void powertrain_print_status(void)
     steering_input_filter_status_t steering_filter_status;
     uint16_t steering_filter_output_us;
     uint32_t steering_rejected_spikes;
+    steering_limit_telemetry_t steering_limit_snapshot;
 
     controller_lock();
     throttle_snapshot = throttle_cal;
@@ -1471,6 +1632,7 @@ void powertrain_print_status(void)
     steering_filter_status = steering_input_filter_status(&steering_input_filter);
     steering_filter_output_us = steering_input_filter.output_us;
     steering_rejected_spikes = steering_input_filter.rejected_spike_count;
+    steering_limit_snapshot = steering_limit_telemetry;
     esc_output_get(&outputs);
     if (rpm_initialized) rpm_sensor_get_snapshot(&rpm);
     if (imu_initialized) imu_sensor_get_snapshot(&imu);
@@ -1540,9 +1702,22 @@ void powertrain_print_status(void)
     printf("  drive: reverse_limit=%u%%, motor=%u poles, RPM PPR=%u\n",
            config_snapshot.reverse_limit_percent, config_snapshot.motor_poles,
            config_snapshot.rpm_pulses_per_revolution);
+    printf("  geometry: wheel=%.0f mm wheelbase=%.0f mm track=%.0f mm\n",
+           (double)(DEFAULT_WHEEL_DIAMETER_M * 1000.0f),
+           (double)(DEFAULT_WHEELBASE_M * 1000.0f),
+           (double)(DEFAULT_TRACK_WIDTH_M * 1000.0f));
     printf("  steering config: trim=%+.1f command degrees, smoothing=%u ms\n",
            (double)config_snapshot.steering_trim_tenths_deg / 10.0,
            config_snapshot.steering_smoothing_ms);
+    printf("  steering speed limit: %s, ceiling=%.2f g, speed=%.1f km/h%s, "
+           "requested/maximum average angle=%+.2f/%.2f deg%s\n",
+           config_snapshot.steering_speed_limit_enabled ? "enabled" : "disabled",
+           (double)config_snapshot.steering_lateral_accel_g,
+           (double)(steering_limit_snapshot.vehicle_speed_mps * 3.6f),
+           steering_limit_snapshot.speed_valid ? "" : " unavailable",
+           (double)steering_limit_snapshot.requested_average_wheel_deg,
+           (double)steering_limit_snapshot.maximum_average_wheel_deg,
+           steering_limit_snapshot.steering_limited ? " LIMITED" : "");
     printf("  steering curve: servo=%+.2f deg LF=%+.2f deg RF=%+.2f deg "
            "average=%+.2f deg normalized=%+.3f%s%s\n",
            steering_geometry.servo_command_deg,
@@ -1559,11 +1734,14 @@ void powertrain_print_status(void)
     } else {
         printf("  throttle-pulse failsafe: disabled\n");
     }
-    printf("  TV: configured=%s, CH5=%s, active=%s, authority=+/- %u%%, reason=%s\n",
+    printf("  TV: configured=%s, CH5=%s, active=%s, authority=+/- %u%%, "
+           "front_relief_max=%u%% current=%.1f%%, reason=%s\n",
            config_snapshot.torque_vectoring_enabled ? "enabled" : "disabled",
            tv_mode_name(requested_mode),
            vector_snapshot.active ? tv_mode_name(vector_snapshot.active_mode) : "no",
            config_snapshot.tv_authority_percent,
+           config_snapshot.tv_front_relief_percent,
+           (double)(vector_snapshot.front_relief * 100.0f),
            vector_snapshot.inactive_reason ? vector_snapshot.inactive_reason : "not evaluated");
     printf("  IMU: %s, bias=%s, yaw=%+.2f dps\n",
            imu.valid ? "valid" : "unavailable",
@@ -1625,6 +1803,7 @@ void powertrain_monitor_steering(void)
             steering_input_filter_status(&steering_input_filter);
         uint16_t filter_output_us = steering_input_filter.output_us;
         uint32_t rejected_spikes = steering_input_filter.rejected_spike_count;
+        steering_limit_telemetry_t limit = steering_limit_telemetry;
         controller_unlock();
         if (rc_input_get(RC_CHANNEL_STEERING, &sample)) {
             char median_text[24];
@@ -1636,6 +1815,7 @@ void powertrain_monitor_steering(void)
             }
             printf("steering: input=%u us median=%s output=%u us servo=%+.2f deg "
                    "LF=%+.2f deg RF=%+.2f deg average=%+.2f deg normalized=%+.3f "
+                   "speed=%.1f km/h%s max=%.2f deg limited=%s "
                    "filter=%s rejected=%lu%s%s\n",
                    sample.pulse_us, median_text, servo_output_get_pulse(),
                    geometry.servo_command_deg,
@@ -1643,6 +1823,10 @@ void powertrain_monitor_steering(void)
                    geometry.right_wheel_deg,
                    geometry.average_wheel_deg,
                    geometry.normalized_average,
+                   (double)(limit.vehicle_speed_mps * 3.6f),
+                   limit.speed_valid ? "" : " unavailable",
+                   (double)limit.maximum_average_wheel_deg,
+                   limit.steering_limited ? "yes" : "no",
                    steering_input_filter_status_name(filter_status),
                    (unsigned long)rejected_spikes,
                    geometry.valid ? "" : " invalid",
@@ -1730,11 +1914,14 @@ void powertrain_monitor_rpm(void)
 void powertrain_monitor_imu(void)
 {
     int64_t end_at_us = esp_timer_get_time() + MONITOR_DURATION_US;
+    printf("Monitoring IMU for 30 seconds; monitoring does not start calibration.\n");
     while (esp_timer_get_time() < end_at_us) {
         imu_snapshot_t imu = {0};
         if (imu_initialized) imu_sensor_get_snapshot(&imu);
-        printf("IMU: %s yaw=%+.2f dps gyro=[%+.2f %+.2f %+.2f] accel=[%+.2f %+.2f %+.2f]\n",
+        printf("IMU: %s bias=%s yaw=%+.2f dps gyro=[%+.2f %+.2f %+.2f] "
+               "accel=[%+.2f %+.2f %+.2f]\n",
                imu.valid ? "valid" : "missing",
+               imu.bias_calibrated ? "calibrated" : "not-calibrated",
                imu.yaw_rate_dps,
                imu.gyro_dps[0], imu.gyro_dps[1], imu.gyro_dps[2],
                imu.accel_mps2[0], imu.accel_mps2[1], imu.accel_mps2[2]);
@@ -1753,6 +1940,7 @@ void powertrain_monitor_vectoring(void)
         controller_unlock();
         printf("TV: CH5=%s active=%s steer=%+.2f deg wheels=%+.2f/%+.2f deg "
                "target_yaw=%+.2f error=%+.2f rpm_error=%+.3f "
+               "lateral=%.2f m/s2 demand=%.2f front_relief=%.3f "
                "correction=[%+.3f %+.3f %+.3f %+.3f] reason=%s\n",
                tv_mode_name(mode),
                output.active ? "yes" : "no",
@@ -1762,6 +1950,9 @@ void powertrain_monitor_vectoring(void)
                output.target_yaw_rate_dps,
                output.yaw_error_dps,
                output.side_rpm_error,
+               output.predicted_lateral_accel_mps2,
+               output.lateral_demand,
+               output.front_relief,
                output.wheel_correction[0],
                output.wheel_correction[1],
                output.wheel_correction[2],
@@ -1785,7 +1976,10 @@ void powertrain_print_help(void)
     printf("  config rpm ppr <1-120>\n");
     printf("  config steering trim <-15..15>\n");
     printf("  config steering smoothing <0-500>\n");
+    printf("  config steering speed-limit <on|off>\n");
+    printf("  config steering lateral-g <0.2-3.0>\n");
     printf("  config tv authority <0-25>\n");
+    printf("  config tv front-relief <0-50>\n");
     printf("  config tv gains <yaw_gain_dps> <turn_rpm_gain> <yaw_kp> <yaw_ki> <rpm_kp>\n");
     printf("  config imu yaw-sign <-1|1>\n");
     printf("  tv enable | tv disable\n\n");

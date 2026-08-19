@@ -91,6 +91,27 @@ static void test_saturation_and_non_finite_rejection(void)
     CHECK(sample.normalized_average == 0.0f);
 }
 
+static void test_inverse_average_wheel_angle_lookup(void)
+{
+    float servo_command_deg = 0.0f;
+    steering_curve_sample_t sample;
+
+    CHECK(steering_curve_servo_for_average(8.0f, &servo_command_deg));
+    CHECK(servo_command_deg > 0.0f);
+    CHECK(steering_curve_sample(servo_command_deg, &sample));
+    CHECK(near(sample.average_wheel_deg, 8.0f, 0.001f));
+
+    CHECK(steering_curve_servo_for_average(-8.0f, &servo_command_deg));
+    CHECK(servo_command_deg < 0.0f);
+    CHECK(steering_curve_sample(servo_command_deg, &sample));
+    CHECK(near(sample.average_wheel_deg, -8.0f, 0.001f));
+
+    CHECK(steering_curve_servo_for_average(100.0f, &servo_command_deg));
+    CHECK(servo_command_deg == 45.0f);
+    CHECK(!steering_curve_servo_for_average(__builtin_nanf(""),
+                                             &servo_command_deg));
+}
+
 int main(void)
 {
     test_center_preserves_toe_out_and_zero_mean();
@@ -99,5 +120,6 @@ int main(void)
     test_piecewise_linear_interpolation_on_nonuniform_segment();
     test_near_center_interpolation_preserves_toe_geometry();
     test_saturation_and_non_finite_rejection();
+    test_inverse_average_wheel_angle_lookup();
     return 0;
 }

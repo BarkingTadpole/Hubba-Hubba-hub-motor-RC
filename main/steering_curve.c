@@ -101,3 +101,41 @@ bool steering_curve_sample(float servo_command_deg, steering_curve_sample_t *sam
     sample->valid = true;
     return true;
 }
+
+bool steering_curve_servo_for_average(float average_wheel_deg,
+                                      float *servo_command_deg)
+{
+    if (servo_command_deg == NULL || !isfinite(average_wheel_deg)) {
+        return false;
+    }
+
+    if (average_wheel_deg <= -STEERING_CURVE_LEFT_MAX_AVERAGE_DEG) {
+        *servo_command_deg = -45.0f;
+        return true;
+    }
+    if (average_wheel_deg >= STEERING_CURVE_RIGHT_MAX_AVERAGE_DEG) {
+        *servo_command_deg = 45.0f;
+        return true;
+    }
+    if (average_wheel_deg == 0.0f) {
+        *servo_command_deg = 0.0f;
+        return true;
+    }
+
+    float lower = average_wheel_deg < 0.0f ? -45.0f : 0.0f;
+    float upper = average_wheel_deg < 0.0f ? 0.0f : 45.0f;
+    for (size_t iteration = 0; iteration < 24; iteration++) {
+        float middle = (lower + upper) * 0.5f;
+        steering_curve_sample_t sample;
+        if (!steering_curve_sample(middle, &sample)) {
+            return false;
+        }
+        if (sample.average_wheel_deg < average_wheel_deg) {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    *servo_command_deg = (lower + upper) * 0.5f;
+    return true;
+}

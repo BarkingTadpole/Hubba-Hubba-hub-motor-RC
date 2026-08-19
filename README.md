@@ -6,7 +6,7 @@ radio system, four Hobbywing HW86060041 RPM sensors, and an Adafruit
 ISM330DHCX IMU.
 
 The normal drive path supports forward/reverse, receiver calibration,
-ESP32 steering-servo pass-through, remote shutdown, receiver-loss protection,
+validated speed-limited steering output, remote shutdown, receiver-loss protection,
 and per-wheel ESC outputs.
 Torque vectoring is implemented but defaults to disabled until its sensors
 are validated and it is explicitly enabled.
@@ -19,6 +19,7 @@ main/
   default_config.h           Receiver defaults and IMU mounting reference
   cli.c                      USB serial command parser
   config_store.c             NVS calibration and configuration
+  cornering_control.c        Speed, steering envelope, and lateral demand
   powertrain_controller.c    Drive state, safety, and calibration workflows
   rc_input.c                 Four priority-3 GPIO PWM inputs
   servo_output.c             Validated 50 Hz steering-servo output
@@ -121,7 +122,10 @@ config rpm poles <even 2-60>
 config rpm ppr <1-120>
 config steering trim <-15..15>
 config steering smoothing <0-500>
+config steering speed-limit <on|off>
+config steering lateral-g <0.2-3.0>
 config tv authority <0-25>
+config tv front-relief <0-50>
 config tv gains <yaw_gain_dps> <turn_rpm_gain> <yaw_kp> <yaw_ki> <rpm_kp>
 config imu yaw-sign <-1|1>
 
@@ -164,6 +168,16 @@ about `40-60 ms`. `status` and `monitor steering` report the raw input, median,
 filter state, and a confirmed isolated-spike count. Repeated control-loop reads
 of one receiver frame do not advance the filter.
 
+Speed-sensitive steering is enabled by default using the measured `107 mm`
+wheel diameter and `445 mm` wheelbase. Average rear-wheel RPM estimates
+vehicle speed, and the measured steering curve limits average road-wheel angle
+to a configurable lateral-acceleration ceiling, initially `1.0 g`. At
+`20 km/h` the initial limit is approximately `8.05 degrees`; at `40 km/h` it
+is approximately `2.02 degrees`. A valid speed held during DRIVE_ARMED is not
+discarded merely because both rear RPM channels become temporarily invalid.
+Use `status` or `monitor steering` to see speed, requested angle, maximum
+angle, and whether limiting is active.
+
 The corrected 45-point steering table maps the applied, smoothed servo command
 from `-45` to `+45 degrees` into separate left-front and right-front road-wheel
 angles. Firmware performs linear interpolation between the nonuniform sample
@@ -174,8 +188,21 @@ frame. Thus, the supplied centered `LF=+1.64` and `RF=+1.64 degrees` toe-out
 becomes runtime `LF=-1.64` and `RF=+1.64 degrees`, with zero mean steering.
 `monitor steering` shows the converted, interpolated angles. Torque vectoring
 uses their direction-normalized average instead of raw normalized servo
-travel, but its yaw target remains empirical until wheelbase, front track,
-effective tire radius, and a defensible vehicle-speed estimate are available.
+travel. Its yaw target remains empirical; RPM-derived speed currently drives
+the steering envelope and front-axle relief rather than replacing that target.
+
+In active FULL mode, predicted lateral demand can remove up to `20%` of full
+ESC span from both front motors by default. This deliberately reduces total
+power rather than transferring it immediately to the rear. OFF and STRAIGHT
+retain their existing axle behavior. Tune the feature while disarmed with
+`config tv front-relief <0-50>`.
+
+`monitor imu` is read-only and never starts calibration. The five-second bias
+sample runs once inside firmware initialization on every ESP32 boot. Opening
+some USB serial monitors toggles the devkit reset lines; reconnecting such a
+monitor causes a new boot and therefore another legitimate startup
+calibration. Use a terminal configured not to toggle DTR/RTS when attaching
+without resetting the controller.
 
 `status` includes maximum observed sensor/powertrain execution time, deadline
 overruns, minimum free task stack, and current/minimum heap. Those values are

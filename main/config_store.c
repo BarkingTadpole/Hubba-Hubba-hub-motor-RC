@@ -235,8 +235,11 @@ void config_store_load_drive(drive_config_t *config)
         .rpm_pulses_per_revolution = 7,
         .steering_trim_tenths_deg = 0,
         .steering_smoothing_ms = 60,
+        .steering_speed_limit_enabled = DEFAULT_STEERING_SPEED_LIMIT_ENABLED != 0,
+        .steering_lateral_accel_g = DEFAULT_STEERING_LATERAL_ACCEL_G,
         .torque_vectoring_enabled = false,
         .tv_authority_percent = 10,
+        .tv_front_relief_percent = DEFAULT_TV_FRONT_RELIEF_PERCENT,
         .tv_turn_yaw_gain_dps = 180.0f,
         .tv_turn_rpm_gain = 0.20f,
         .tv_yaw_kp = 0.00025f,
@@ -282,11 +285,24 @@ void config_store_load_drive(drive_config_t *config)
     if (nvs_get_u16(nvs, "st_smooth", &u16) == ESP_OK && u16 <= 500) {
         config->steering_smoothing_ms = u16; found = true;
     }
+    if (nvs_get_u8(nvs, "st_spdlim", &u8) == ESP_OK && u8 <= 1) {
+        config->steering_speed_limit_enabled = u8 != 0; found = true;
+    }
+    if (nvs_get_u32(nvs, "st_latg", &u32) == ESP_OK) {
+        float lateral_accel_g = scaled_to_float(u32);
+        if (isfinite(lateral_accel_g) && lateral_accel_g >= 0.2f &&
+            lateral_accel_g <= 3.0f) {
+            config->steering_lateral_accel_g = lateral_accel_g; found = true;
+        }
+    }
     if (nvs_get_u8(nvs, "tv_en", &u8) == ESP_OK && u8 <= 1) {
         config->torque_vectoring_enabled = u8 != 0; found = true;
     }
     if (nvs_get_u8(nvs, "tv_auth", &u8) == ESP_OK && u8 <= 25) {
         config->tv_authority_percent = u8; found = true;
+    }
+    if (nvs_get_u8(nvs, "tv_frelief", &u8) == ESP_OK && u8 <= 50) {
+        config->tv_front_relief_percent = u8; found = true;
     }
     if (nvs_get_u32(nvs, "yaw_gain", &u32) == ESP_OK && u32 <= 500000000) {
         config->tv_turn_yaw_gain_dps = scaled_to_float(u32); found = true;
@@ -324,8 +340,11 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     if (err == ESP_OK) err = nvs_set_u16(nvs, "rpm_ppr", config->rpm_pulses_per_revolution);
     if (err == ESP_OK) err = nvs_set_i16(nvs, "st_trim10", config->steering_trim_tenths_deg);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "st_smooth", config->steering_smoothing_ms);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "st_spdlim", config->steering_speed_limit_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u32(nvs, "st_latg", float_to_scaled(config->steering_lateral_accel_g));
     if (err == ESP_OK) err = nvs_set_u8(nvs, "tv_en", config->torque_vectoring_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "tv_auth", config->tv_authority_percent);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "tv_frelief", config->tv_front_relief_percent);
     if (err == ESP_OK) err = nvs_set_u32(nvs, "yaw_gain", float_to_scaled(config->tv_turn_yaw_gain_dps));
     if (err == ESP_OK) err = nvs_set_u32(nvs, "turn_rpm", float_to_scaled(config->tv_turn_rpm_gain));
     if (err == ESP_OK) err = nvs_set_u32(nvs, "yaw_kp", float_to_scaled(config->tv_yaw_kp));

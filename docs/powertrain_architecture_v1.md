@@ -162,7 +162,8 @@ input and output pulse widths with `monitor steering` and an oscilloscope or
 signal tester, not with a multimeter's DC voltage mode.
 
 The servo starts at the saved steering center, follows valid CH1 commands at
-50 Hz, clamps commands to the calibrated left/right endpoints, and applies
+50 Hz subject to its speed-sensitive envelope, clamps commands to the
+calibrated left/right endpoints, and applies
 the steering deadband at center. A configurable first-order command filter
 smooths valid requests; its default time constant is `60 ms` and `0 ms`
 disables it. Before smoothing, a median filter uses the latest three distinct
@@ -207,6 +208,8 @@ control. Configuration changes are accepted only while disarmed:
 ```text
 config steering trim <-15..15>
 config steering smoothing <0-500>
+config steering speed-limit <on|off>
+config steering lateral-g <0.2-3.0>
 ```
 
 ### Steering Curves
@@ -238,7 +241,33 @@ range saturate to the nearest endpoint. Interpolation produces separate LF/RF
 headings, their common-frame mean, and a direction-specific normalized mean:
 `+29.738 degrees` is full right and `-31.079 degrees` is full left. That
 normalized mean is the steering input to the empirical torque-vectoring
-target. The curve never changes the servo output.
+target. The curve also provides the inverse lookup used by the speed-sensitive
+steering envelope, so limiting is performed in measured average road-wheel
+degrees rather than raw PWM percentage.
+
+### Speed-Sensitive Steering
+
+The measured geometry defaults are wheel diameter `107 mm`, wheelbase
+`445 mm`, and track width `320 mm`. Average rear-wheel RPM estimates chassis
+speed:
+
+```text
+speed_mps = average_rear_rpm * pi * 0.107 / 60
+max_average_wheel_angle = atan(0.445 * lateral_accel_limit / speed_mps^2)
+```
+
+The limiter is enabled by default with a `1.0 g` ceiling. It uses the inverse
+45-point steering curve to clamp the requested average wheel angle before the
+existing first-order steering smoother. At `20 km/h` the initial limit is
+approximately `8.05 degrees`; at `40 km/h` it is approximately `2.02 degrees`.
+Low speed naturally permits the full measured steering range.
+
+Both rear RPM channels must be valid before a new speed estimate is accepted.
+While DRIVE_ARMED, the last valid estimate is retained through a temporary
+RPM dropout so loss of speed telemetry cannot suddenly restore full steering.
+The estimate resets when disarmed. If no valid speed has ever been observed,
+the limiter cannot infer speed and leaves the requested steering unchanged.
+This limitation is why RPM validation remains required before powered tests.
 
 The earlier 91-point CSV and its cubic fits were superseded by this corrected
 table and are not evaluated by the control path. Linear interpolation avoids
@@ -562,6 +591,12 @@ input/configuration becomes non-finite, or if any RPM raw frequency is below
 `16.7 Hz`, the controller immediately resets its integral and falls back to
 equal throttle outputs.
 
+`monitor imu` only reads the latest snapshot and reports whether its bias is
+calibrated. It never invokes calibration. USB serial programs may toggle the
+DOIT devkit DTR/RTS reset lines when attaching; that starts a new ESP32 boot
+and therefore correctly starts another five-second calibration. Use a serial
+terminal with DTR/RTS reset disabled to attach without rebooting.
+
 ### CH5 Modes
 
 - OFF: equal four-wheel commands. A CH5 pulse outside all three learned
@@ -600,6 +635,25 @@ correction = yaw_kp * yaw_error
              + rpm_kp * rpm_error
 ```
 
+FULL mode also estimates lateral demand from RPM speed and applied average
+road-wheel angle:
+
+```text
+predicted_lateral_accel = speed^2 * tan(abs(wheel_angle)) / wheelbase
+lateral_demand = clamp(predicted_lateral_accel / configured_limit, 0, 1)
+front_relief = min(front_relief_max * lateral_demand, base_throttle)
+
+FL = base + correction - front_relief
+FR = base - correction - front_relief
+RL = base + correction
+RR = base - correction
+```
+
+Front relief defaults to `20%` of full ESC span and only operates while FULL
+mode is active. It deliberately reduces total requested power instead of
+immediately transferring power rearward. OFF and STRAIGHT do not apply it.
+Configure it while disarmed with `config tv front-relief <0-50>`.
+
 The sign convention is internally consistent: positive steering and positive
 yaw both mean a right turn, and positive correction adds left-side torque
 while removing the same amount on the right. The integral is conditionally
@@ -607,10 +661,10 @@ held when the requested correction is saturated and additional integration
 would drive farther into saturation. This is anti-windup for the existing
 controller; it does not make the empirical yaw target a vehicle model.
 
-Correction defaults to at most `+/-10%` of full throttle span. Left and
-right corrections are equal and opposite, so requested mean power is
-preserved. Correction naturally reduces near zero and full throttle because
-one side cannot go below minimum or above maximum.
+Side correction defaults to at most `+/-10%` of full throttle span. Left and
+right side corrections are equal and opposite. FULL-mode front relief is a
+separate non-balanced reduction, so mean requested power intentionally falls
+as lateral demand increases. Outputs remain clamped to the ESC range.
 
 Vectoring is forward-only in this version. Reverse always uses equal
 throttle.
@@ -619,6 +673,7 @@ Initial tuning commands:
 
 ```text
 config tv authority 10
+config tv front-relief 20
 config tv gains 180 0.20 0.00025 0.00004 0.20
 config imu yaw-sign 1
 ```
@@ -635,6 +690,8 @@ at low speed, starting with authority at 2 to 5 percent.
 - `default_config.h`: owns compiled receiver defaults and the IMU mounting
   reference.
 - `config_store.c`: owns defaults and NVS persistence.
+- `cornering_control.c`: converts rear RPM to speed and calculates the
+  steering envelope and lateral demand.
 - `rc_input.c`: captures CH1, CH2, CH4, and CH5 PWM with priority-3 GPIO edge
   interrupts on CPU0.
 - `esc_output.c`: generates eight independent 50 Hz LEDC outputs.
@@ -658,7 +715,9 @@ at low speed, starting with authority at 2 to 5 percent.
 3. Verify the GPIO32 servo output follows CH1, respects both calibrated
    endpoints, and centers when CH1 disappears. Compare `monitor steering`
    curve angles with physical road-wheel measurements at center, intermediate
-   points, and both endpoints; abort if the wheel-local sign conversion,
+   points, and both endpoints; spin both rear wheels together and verify the
+   reported speed and steering limit before motor power is connected. Abort if
+   the wheel-local sign conversion,
    centered toe-out, or measured angles differ.
 4. Verify both CH4 STOP/OFF positions disarm from every drive state while
    steering remains responsive.

@@ -84,8 +84,11 @@ typedef struct {
     uint16_t rpm_pulses_per_revolution;
     int16_t steering_trim_tenths_deg;
     uint16_t steering_smoothing_ms;
+    bool steering_speed_limit_enabled;
+    float steering_lateral_accel_g;
     bool torque_vectoring_enabled;
     uint8_t tv_authority_percent;
+    uint8_t tv_front_relief_percent;
     float tv_turn_yaw_gain_dps;
     float tv_turn_rpm_gain;
     float tv_yaw_kp;

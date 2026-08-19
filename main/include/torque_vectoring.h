@@ -7,6 +7,8 @@ typedef struct {
     drive_direction_t direction;
     float base_throttle;
     float steering;
+    float vehicle_speed_mps;
+    float average_wheel_angle_deg;
     rpm_snapshot_t rpm;
     imu_snapshot_t imu;
     float dt_seconds;
@@ -17,6 +19,9 @@ typedef struct {
     float target_yaw_rate_dps;
     float yaw_error_dps;
     float side_rpm_error;
+    float predicted_lateral_accel_mps2;
+    float lateral_demand;
+    float front_relief;
     tv_mode_t active_mode;
     bool active;
     const char *inactive_reason;

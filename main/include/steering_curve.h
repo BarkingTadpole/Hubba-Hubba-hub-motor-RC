@@ -13,3 +13,5 @@ typedef struct {
 } steering_curve_sample_t;
 
 bool steering_curve_sample(float servo_command_deg, steering_curve_sample_t *sample);
+bool steering_curve_servo_for_average(float average_wheel_deg,
+                                      float *servo_command_deg);
