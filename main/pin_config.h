@@ -45,3 +45,12 @@
 #define PIN_IMU_I2C_SCL GPIO_NUM_22
 #define PIN_IMU_INT1 GPIO_NUM_NC
 #define PIN_IMU_INT2 GPIO_NUM_NC
+
+/*
+ * Dragy Lite UART1 routed through the GPIO matrix. GPIO5 is a strapping pin,
+ * so the Dragy RX input must not pull it away from its required boot level.
+ * Dragy compass SDA/SCL share GPIO23/GPIO22 with the IMU rather than creating
+ * duplicate physical pin assignments here.
+ */
+#define PIN_DRAGY_UART_RX GPIO_NUM_4
+#define PIN_DRAGY_UART_TX GPIO_NUM_5

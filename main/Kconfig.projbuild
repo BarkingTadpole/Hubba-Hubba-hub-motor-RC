@@ -1,0 +1,82 @@
+menu "RC car Wi-Fi access point"
+
+    config RC_WIFI_CONTROL_ENABLED
+        bool "Host the browser viewer from an ESP32 access point"
+        default y
+        help
+            Create a 2.4 GHz WPA2 access point and serve the complete browser
+            viewer directly from the ESP32. No external WLAN, DHCP address,
+            or Python bridge is required. The HTTP API retains the existing
+            guarded configuration and calibration boundary and never exposes
+            arm, throttle, or steering commands.
+
+    config RC_WIFI_AP_SSID
+        string "Access-point SSID"
+        depends on RC_WIFI_CONTROL_ENABLED
+        default "RC-Car-ESP32"
+
+    config RC_WIFI_AP_PASSWORD
+        string "Access-point WPA2 password"
+        depends on RC_WIFI_CONTROL_ENABLED
+        default "rc-car-viewer"
+        help
+            WPA2 requires 8-63 characters. Change this before operating around
+            untrusted devices because connected clients can access guarded
+            configuration and calibration actions.
+
+    config RC_WIFI_AP_CHANNEL
+        int "2.4 GHz channel"
+        depends on RC_WIFI_CONTROL_ENABLED
+        range 1 13
+        default 1
+
+    config RC_WIFI_AP_MAX_CLIENTS
+        int "Maximum connected viewer devices"
+        depends on RC_WIFI_CONTROL_ENABLED
+        range 1 4
+        default 4
+
+    config RC_WIFI_HTTP_PORT
+        int "Viewer HTTP port"
+        depends on RC_WIFI_CONTROL_ENABLED
+        range 80 65535
+        default 80
+
+endmenu
+
+menu "RC car offline telemetry log"
+
+    config RC_TELEMETRY_LOG_ENABLED
+        bool "Record all telemetry channels to internal-flash CSV"
+        default y
+        help
+            Append telemetry to a wear-levelled FAT partition independently
+            of Wi-Fi. Recording stops instead of overwriting old samples when
+            the partition is full. The browser bridge can export or explicitly
+            clear the CSV.
+
+endmenu
+
+menu "Dragy Lite GPS"
+
+    config RC_DRAGY_LITE_ENABLED
+        bool "Enable Dragy Lite GPS on UART1"
+        default n
+        help
+            Route UART1 through GPIO4/RX and GPIO5/TX for the Dragy Lite GPS.
+            This preserves UART0 for USB flashing and the serial CLI. Deferred
+            compass discovery on the shared I2C bus is best-effort and cannot
+            prevent UART GPS startup. GPIO5 is a strapping pin; do not attach
+            an external pull-up or pull-down to it.
+
+    config RC_DRAGY_UART_BAUD
+        int "Dragy Lite UART baud rate"
+        depends on RC_DRAGY_LITE_ENABLED
+        range 9600 921600
+        default 9600
+        help
+            MAX-M10S defaults to 9600 baud, 8 data bits, no parity, and one
+            stop bit. Change this only if the Dragy output has been configured
+            for another rate.
+
+endmenu

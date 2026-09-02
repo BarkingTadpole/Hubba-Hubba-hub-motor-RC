@@ -8,6 +8,8 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "pin_config.h"
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
 
 #define RC_PULSE_MIN_US 800
 #define RC_PULSE_MAX_US 2200
@@ -44,8 +46,12 @@ static void IRAM_ATTR rc_channel_isr(void *arg)
 {
     rc_channel_state_t *channel = arg;
     int64_t now_us = esp_timer_get_time();
+    uint32_t levels = channel->gpio < 32 ? REG_READ(GPIO_IN_REG)
+                                         : REG_READ(GPIO_IN1_REG);
+    uint32_t bit = channel->gpio < 32 ? (uint32_t)channel->gpio
+                                      : (uint32_t)channel->gpio - 32U;
 
-    if (gpio_get_level(channel->gpio) != 0) {
+    if ((levels & (1U << bit)) != 0) {
         channel->rise_time_us = now_us;
         return;
     }
@@ -81,8 +87,14 @@ esp_err_t rc_input_init(void)
         return err;
     }
 
-    err = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    /*
+     * Telemetry logging writes to internal flash. Keep receiver edge capture
+     * running while the flash cache is disabled or a delayed edge can look
+     * like a valid but badly distorted PWM pulse. The ISR therefore uses only
+     * IRAM/DRAM-safe operations, including a direct GPIO input-register read.
+     */
+    err = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3 | ESP_INTR_FLAG_IRAM);
+    if (err != ESP_OK) {
         return err;
     }
 

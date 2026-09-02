@@ -6,6 +6,7 @@
 
 #include "cornering_control.h"
 #include "default_config.h"
+#include "drivetrain_control.h"
 
 #define RPM_MIN_CONTROL_FREQUENCY_HZ 16.7f
 
@@ -75,6 +76,10 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
         set_inactive(state, output, "controller input is outside its valid range");
         return;
     }
+    if (!drivetrain_mode_valid(config->drivetrain_mode)) {
+        set_inactive(state, output, "invalid drivetrain mode");
+        return;
+    }
     if (!config->torque_vectoring_enabled) {
         set_inactive(state, output, "disabled in configuration");
         return;
@@ -96,6 +101,10 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
         return;
     }
     for (size_t wheel = 0; wheel < POWERTRAIN_WHEEL_COUNT; wheel++) {
+        if (!drivetrain_wheel_is_driven(config->drivetrain_mode,
+                                        (wheel_id_t)wheel)) {
+            continue;
+        }
         if (!input->rpm.valid[wheel] || !isfinite(input->rpm.rpm[wheel]) ||
             !isfinite(input->rpm.frequency_hz[wheel]) ||
             input->rpm.rpm[wheel] < 0.0f) {
@@ -112,10 +121,20 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
         return;
     }
 
-    float left_rpm = (input->rpm.rpm[WHEEL_FRONT_LEFT] +
-                      input->rpm.rpm[WHEEL_REAR_LEFT]) * 0.5f;
-    float right_rpm = (input->rpm.rpm[WHEEL_FRONT_RIGHT] +
-                       input->rpm.rpm[WHEEL_REAR_RIGHT]) * 0.5f;
+    float left_rpm;
+    float right_rpm;
+    if (config->drivetrain_mode == DRIVETRAIN_FWD) {
+        left_rpm = input->rpm.rpm[WHEEL_FRONT_LEFT];
+        right_rpm = input->rpm.rpm[WHEEL_FRONT_RIGHT];
+    } else if (config->drivetrain_mode == DRIVETRAIN_RWD) {
+        left_rpm = input->rpm.rpm[WHEEL_REAR_LEFT];
+        right_rpm = input->rpm.rpm[WHEEL_REAR_RIGHT];
+    } else {
+        left_rpm = (input->rpm.rpm[WHEEL_FRONT_LEFT] +
+                    input->rpm.rpm[WHEEL_REAR_LEFT]) * 0.5f;
+        right_rpm = (input->rpm.rpm[WHEEL_FRONT_RIGHT] +
+                     input->rpm.rpm[WHEEL_REAR_RIGHT]) * 0.5f;
+    }
     float average_rpm = (left_rpm + right_rpm) * 0.5f;
     if (average_rpm <= 0.0f) {
         set_inactive(state, output, "average wheel speed is zero");
@@ -175,7 +194,8 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
     float predicted_lateral_accel_mps2 = 0.0f;
     float lateral_demand = 0.0f;
     float front_relief = 0.0f;
-    if (input->requested_mode == TV_MODE_FULL) {
+    if (input->requested_mode == TV_MODE_FULL &&
+        config->drivetrain_mode != DRIVETRAIN_RWD) {
         lateral_demand = cornering_lateral_demand(
             input->vehicle_speed_mps,
             input->average_wheel_angle_deg,
@@ -189,14 +209,18 @@ void torque_vectoring_update(torque_vectoring_state_t *state,
         }
     }
 
-    output->wheel_correction[WHEEL_FRONT_LEFT] =
-        clampf(side_correction - front_relief,
-               -input->base_throttle, 1.0f - input->base_throttle);
-    output->wheel_correction[WHEEL_REAR_LEFT] = side_correction;
-    output->wheel_correction[WHEEL_FRONT_RIGHT] =
-        clampf(-side_correction - front_relief,
-               -input->base_throttle, 1.0f - input->base_throttle);
-    output->wheel_correction[WHEEL_REAR_RIGHT] = -side_correction;
+    if (drivetrain_wheel_is_driven(config->drivetrain_mode, WHEEL_FRONT_LEFT)) {
+        output->wheel_correction[WHEEL_FRONT_LEFT] =
+            clampf(side_correction - front_relief,
+                   -input->base_throttle, 1.0f - input->base_throttle);
+        output->wheel_correction[WHEEL_FRONT_RIGHT] =
+            clampf(-side_correction - front_relief,
+                   -input->base_throttle, 1.0f - input->base_throttle);
+    }
+    if (drivetrain_wheel_is_driven(config->drivetrain_mode, WHEEL_REAR_LEFT)) {
+        output->wheel_correction[WHEEL_REAR_LEFT] = side_correction;
+        output->wheel_correction[WHEEL_REAR_RIGHT] = -side_correction;
+    }
     output->target_yaw_rate_dps = target_yaw_rate_dps;
     output->yaw_error_dps = yaw_error_dps;
     output->side_rpm_error = side_rpm_error;

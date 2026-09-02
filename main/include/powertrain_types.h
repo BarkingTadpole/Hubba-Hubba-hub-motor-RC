@@ -27,6 +27,12 @@ typedef enum {
 } drive_direction_t;
 
 typedef enum {
+    DRIVETRAIN_AWD = 0,
+    DRIVETRAIN_FWD,
+    DRIVETRAIN_RWD,
+} drivetrain_mode_t;
+
+typedef enum {
     TV_MODE_OFF = 0,
     TV_MODE_STRAIGHT,
     TV_MODE_FULL,
@@ -76,7 +82,9 @@ typedef struct {
 } esc_limits_t;
 
 typedef struct {
+    drivetrain_mode_t drivetrain_mode;
     uint8_t reverse_limit_percent;
+    uint8_t drive_smoothing_percent;
     bool receiver_failsafe_enabled;
     uint16_t receiver_failsafe_us;
     uint16_t receiver_failsafe_window_us;
@@ -95,6 +103,8 @@ typedef struct {
     float tv_yaw_ki;
     float tv_rpm_kp;
     int8_t imu_yaw_sign;
+    bool permanent_arm_latch_enabled;
+    uint8_t telemetry_log_rate_hz;
     bool loaded_from_nvs;
 } drive_config_t;
 

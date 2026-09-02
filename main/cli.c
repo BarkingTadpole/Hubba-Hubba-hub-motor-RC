@@ -48,6 +48,8 @@ static void handle_command(char *line)
         powertrain_print_help();
     } else if (strcmp(line, "arm") == 0) {
         powertrain_arm_from_cli();
+    } else if (strcmp(line, "disarm config") == 0) {
+        powertrain_disarm_for_configuration();
     } else if (strcmp(line, "disarm") == 0 || strcmp(line, "stop") == 0) {
         powertrain_disarm();
     } else if (strcmp(line, "cal receiver") == 0) {
@@ -96,6 +98,16 @@ static void handle_command(char *line)
     } else if (strcmp(line, "monitor imu") == 0 ||
                strcmp(line, "mon imu") == 0) {
         powertrain_monitor_imu();
+    } else if (strcmp(line, "monitor gps raw") == 0 ||
+               strcmp(line, "mon gps raw") == 0 ||
+               strcmp(line, "monitor dragy raw") == 0 ||
+               strcmp(line, "mon dragy raw") == 0) {
+        powertrain_monitor_gps_raw();
+    } else if (strcmp(line, "monitor gps") == 0 ||
+               strcmp(line, "mon gps") == 0 ||
+               strcmp(line, "monitor dragy") == 0 ||
+               strcmp(line, "mon dragy") == 0) {
+        powertrain_monitor_gps();
     } else if (strcmp(line, "monitor vector") == 0 ||
                strcmp(line, "mon vector") == 0) {
         powertrain_monitor_vectoring();
@@ -103,12 +115,33 @@ static void handle_command(char *line)
         powertrain_set_tv_enabled(true);
     } else if (strcmp(line, "tv disable") == 0) {
         powertrain_set_tv_enabled(false);
+    } else if (strcmp(line, "config drivetrain awd") == 0) {
+        powertrain_set_drivetrain_mode(DRIVETRAIN_AWD);
+    } else if (strcmp(line, "config drivetrain fwd") == 0) {
+        powertrain_set_drivetrain_mode(DRIVETRAIN_FWD);
+    } else if (strcmp(line, "config drivetrain rwd") == 0) {
+        powertrain_set_drivetrain_mode(DRIVETRAIN_RWD);
+    } else if (strncmp(line, "config drivetrain", 17) == 0) {
+        printf("ERR: usage is 'config drivetrain <awd|fwd|rwd>'\n");
+    } else if (strcmp(line, "config arm-latch on") == 0) {
+        powertrain_set_permanent_arm_latch_enabled(true);
+    } else if (strcmp(line, "config arm-latch off") == 0) {
+        powertrain_set_permanent_arm_latch_enabled(false);
+    } else if (strncmp(line, "config arm-latch", 16) == 0) {
+        printf("ERR: usage is 'config arm-latch <on|off>'\n");
     } else if (strncmp(line, "config reverse ", 15) == 0) {
         unsigned long percent = 0;
         if (!parse_unsigned(line + 15, &percent) || percent > 100) {
             printf("ERR: usage is 'config reverse <0-100>'\n");
         } else {
             powertrain_set_reverse_limit((uint8_t)percent);
+        }
+    } else if (strncmp(line, "config drive smoothing ", 23) == 0) {
+        unsigned long percent = 0;
+        if (!parse_unsigned(line + 23, &percent) || percent > 100) {
+            printf("ERR: usage is 'config drive smoothing <0-100>'\n");
+        } else {
+            powertrain_set_drive_smoothing((uint8_t)percent);
         }
     } else if (strcmp(line, "config failsafe off") == 0) {
         powertrain_set_failsafe_enabled(false);
@@ -200,6 +233,13 @@ static void handle_command(char *line)
             printf("ERR: usage is 'config imu yaw-sign <-1|1>'\n");
         } else {
             powertrain_set_imu_yaw_sign((int8_t)sign);
+        }
+    } else if (strncmp(line, "config logging rate ", 20) == 0) {
+        unsigned long rate_hz = 0;
+        if (!parse_unsigned(line + 20, &rate_hz) || rate_hz < 1 || rate_hz > 50) {
+            printf("ERR: usage is 'config logging rate <1-50>'\n");
+        } else {
+            powertrain_set_logging_rate_hz((uint8_t)rate_hz);
         }
     } else {
         printf("ERR: unknown command '%s'. Type 'help'.\n", line);

@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RC Car Control Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">ESP32 POWERTRAIN</p>
+      <h1>RC Car Monitor</h1>
+    </div>
+    <div id="connection" class="connection offline">ESP32 viewer offline</div>
+  </header>
+
+  <main>
+    <section class="link-health panel compact-panel">
+      <div><span>Browser → ESP32</span><strong class="ok">Direct HTTP</strong></div>
+      <div><span>Access point</span><strong id="tcp-health">--</strong></div>
+      <div><span>Telemetry snapshot</span><strong id="telemetry-health">--</strong></div>
+      <div><span>Viewer API</span><strong id="protocol-health">--</strong></div>
+    </section>
+    <section class="hero-grid">
+      <article class="hero-card">
+        <span>Controller</span><strong id="state">--</strong><small id="state-detail">Waiting for telemetry</small>
+      </article>
+      <article class="hero-card">
+        <span>Drivetrain</span><strong id="drive-mode">--</strong><small id="arm-cycle">Initial arm cycle --</small>
+      </article>
+      <article class="hero-card">
+        <span>Vehicle speed</span><strong><span id="speed">--</span> <em>km/h</em></strong><small id="steering-limit">Steering limit --</small>
+      </article>
+      <article class="hero-card">
+        <span>IMU yaw</span><strong><span id="yaw">--</span> <em>deg/s</em></strong><small id="imu-state">IMU --</small>
+      </article>
+      <article class="hero-card">
+        <span>Dragy GPS</span><strong><span id="gps-speed">--</span> <em>km/h</em></strong><small id="gps-state">GPS --</small>
+      </article>
+    </section>
+
+    <section>
+      <div class="section-title"><div><p class="eyebrow">LIVE INPUTS</p><h2>Receiver channels</h2></div><span>5 Hz telemetry</span></div>
+      <div id="receiver-grid" class="channel-grid"></div>
+    </section>
+
+    <section class="split">
+      <article class="panel">
+        <div class="section-title"><div><p class="eyebrow">WHEEL SPEED</p><h2>RPM sensors</h2></div></div>
+        <table><thead><tr><th>Wheel</th><th>RPM</th><th>Hz</th><th>Edges</th><th>State</th></tr></thead><tbody id="rpm-body"></tbody></table>
+      </article>
+      <article class="panel">
+        <div class="section-title"><div><p class="eyebrow">PWM OUTPUT</p><h2>ESC channels</h2></div></div>
+        <table><thead><tr><th>Wheel</th><th>Throttle</th><th>Reverse</th><th>TV correction</th></tr></thead><tbody id="output-body"></tbody></table>
+      </article>
+    </section>
+
+    <section class="split">
+      <article class="panel telemetry-list">
+        <div class="section-title"><div><p class="eyebrow">DRAGY LITE</p><h2>MAX-M10S GPS</h2></div></div>
+        <dl>
+          <div><dt>UART</dt><dd id="dragy-uart">--</dd></div>
+          <div><dt>Position</dt><dd id="dragy-position">--</dd></div>
+          <div><dt>Course / altitude</dt><dd id="dragy-course-altitude">--</dd></div>
+          <div><dt>Satellites / HDOP</dt><dd id="dragy-quality">--</dd></div>
+          <div><dt>NMEA health</dt><dd id="dragy-nmea">--</dd></div>
+        </dl>
+      </article>
+      <article class="panel telemetry-list">
+        <div class="section-title"><div><p class="eyebrow">SHARED I2C</p><h2>Dragy compass connection</h2></div></div>
+        <dl>
+          <div><dt>Physical bus</dt><dd>GPIO23 SDA / GPIO22 SCL</dd></div>
+          <div><dt>Detected addresses</dt><dd id="dragy-i2c-addresses">--</dd></div>
+          <div><dt>Compass candidate</dt><dd id="dragy-compass-presence">--</dd></div>
+          <div><dt>Heading data</dt><dd id="dragy-compass-data">Protocol not published</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <section class="split">
+      <article class="panel telemetry-list">
+        <div class="section-title"><div><p class="eyebrow">STEERING</p><h2>Applied geometry</h2></div></div>
+        <dl>
+          <div><dt>Servo PWM</dt><dd id="servo-us">--</dd></div>
+          <div><dt>Servo command</dt><dd id="servo-deg">--</dd></div>
+          <div><dt>Left / right wheel</dt><dd id="wheel-deg">--</dd></div>
+          <div><dt>Requested / maximum</dt><dd id="requested-max">--</dd></div>
+          <div><dt>Input filter</dt><dd id="steering-filter">--</dd></div>
+        </dl>
+      </article>
+      <article class="panel telemetry-list">
+        <div class="section-title"><div><p class="eyebrow">TORQUE VECTORING</p><h2>Controller state</h2></div></div>
+        <dl>
+          <div><dt>Requested / active</dt><dd id="tv-modes">--</dd></div>
+          <div><dt>Target / error yaw</dt><dd id="tv-yaw">--</dd></div>
+          <div><dt>Side RPM error</dt><dd id="tv-rpm-error">--</dd></div>
+          <div><dt>Lateral demand</dt><dd id="tv-demand">--</dd></div>
+          <div><dt>Status</dt><dd id="tv-reason">--</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <section id="calibration">
+      <div class="section-title">
+        <div><p class="eyebrow">GUIDED SETUP</p><h2>Calibration console</h2></div>
+        <span>Same controller guards as USB serial</span>
+      </div>
+      <div class="calibration-layout">
+        <article class="panel telemetry-list">
+          <dl>
+            <div><dt>Workflow</dt><dd id="cal-kind">none</dd></div>
+            <div><dt>Step</dt><dd id="cal-step">--</dd></div>
+            <div><dt>Captured PWM</dt><dd id="cal-values">--</dd></div>
+            <div><dt>Instruction</dt><dd id="cal-prompt">Select a calibration below</dd></div>
+          </dl>
+          <div class="calibration-actions">
+            <button id="cal-capture" data-cal-command="cal capture" type="button" disabled>Capture current position</button>
+            <button id="cal-cancel" class="danger" data-cal-command="cal cancel" type="button" disabled>Cancel / safe output</button>
+          </div>
+        </article>
+        <article class="panel">
+          <p class="eyebrow">RECEIVER AND SENSORS</p>
+          <div class="calibration-buttons">
+            <button data-cal-start data-cal-command="cal receiver" type="button">Receiver throttle</button>
+            <button data-cal-start data-cal-command="cal steering" type="button">Steering</button>
+            <button data-cal-start data-cal-command="cal arm" type="button">CH4 arm switch</button>
+            <button data-cal-start data-cal-command="cal tv" type="button">CH5 TV switch</button>
+            <button data-cal-start data-cal-command="cal imu" type="button">IMU yaw bias</button>
+          </div>
+          <p class="hint">Remain DISARMED. Follow the live instruction, position the transmitter control, then capture. Completed receiver calibrations replace their saved NVS values.</p>
+        </article>
+        <article class="panel esc-calibration-panel">
+          <p class="eyebrow">HIGH-RISK ESC OPERATIONS</p>
+          <h3>Endpoint calibration and manual relay</h3>
+          <div class="calibration-buttons">
+            <button id="cal-esc-arm" data-cal-start data-cal-command="cal esc arm" type="button">Arm ESC calibration</button>
+            <button id="cal-esc-max" data-cal-command="cal esc max" type="button" disabled>Output maximum</button>
+            <button id="cal-esc-min" data-cal-command="cal esc min" type="button" disabled>Output minimum</button>
+            <button id="cal-manual" class="danger" data-cal-start data-cal-command="cal manual" type="button">Manual throttle relay</button>
+          </div>
+          <p class="hint warning">Lift and restrain the car. ESC endpoint calibration starts with traction power disconnected. Manual relay follows receiver throttle on all four ESCs for at most 30 seconds. Reverse outputs remain low.</p>
+        </article>
+      </div>
+      <p id="cal-message" class="message">No calibration command sent.</p>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><p class="eyebrow">INTERNAL FLASH</p><h2>Offline CSV recorder</h2></div>
+        <span id="log-state">Waiting for telemetry</span>
+      </div>
+      <div class="split">
+        <article class="panel telemetry-list">
+          <dl>
+            <div><dt>Recorded samples</dt><dd id="log-samples">--</dd></div>
+            <div><dt>File size</dt><dd id="log-size">--</dd></div>
+            <div><dt>Flash remaining</dt><dd id="log-free">--</dd></div>
+            <div><dt>Logging rate</dt><dd id="log-interval">--</dd></div>
+            <div><dt>Write errors</dt><dd id="log-errors">--</dd></div>
+          </dl>
+          <div class="log-actions">
+            <a id="download-log" class="button-link disabled" href="/api/log.csv" download>Export device CSV</a>
+            <button id="clear-log" class="danger" disabled>Clear after export</button>
+          </div>
+          <p class="hint">Recording is independent of Wi-Fi. It stops at full capacity instead of overwriting old samples.</p>
+        </article>
+        <article class="panel telemetry-list">
+          <p class="eyebrow">RETENTION</p>
+          <h3 id="retention-estimate">Estimate available after samples arrive</h3>
+          <p class="hint">Internal flash is finite. For indefinite or 50 Hz logging, add a microSD card or external flash. The last buffered second can be lost if controller power is removed without warning.</p>
+        </article>
+      </div>
+      <p id="log-message" class="message">No log operation requested.</p>
+    </section>
+
+    <section id="analysis">
+      <div class="section-title">
+        <div><p class="eyebrow">POST-RUN ANALYSIS</p><h2>RC car data explorer</h2></div>
+        <span>Runs locally in this browser</span>
+      </div>
+      <article class="panel">
+        <div class="analysis-toolbar">
+          <label>Open exported CSV<input id="analysis-file" type="file" accept=".csv,text/csv"></label>
+          <button id="load-device-log" disabled>Load current device log</button>
+          <label>Signal group<select id="analysis-group">
+            <option value="speed">Vehicle and GPS speed</option>
+            <option value="rpm">Wheel RPM</option>
+            <option value="receiver">Receiver PWM</option>
+            <option value="steering">Steering geometry</option>
+            <option value="yaw">Yaw control</option>
+            <option value="outputs">ESC throttle outputs</option>
+            <option value="vectoring">Torque-vectoring corrections</option>
+            <option value="accel">IMU acceleration</option>
+          </select></label>
+        </div>
+        <div class="analysis-summary">
+          <div><span>Samples</span><strong id="analysis-samples">--</strong></div>
+          <div><span>Duration</span><strong id="analysis-duration">--</strong></div>
+          <div><span>Peak speed</span><strong id="analysis-speed">--</strong></div>
+          <div><span>Peak wheel RPM</span><strong id="analysis-rpm">--</strong></div>
+        </div>
+        <div id="chart-legend" class="chart-legend"></div>
+        <div class="chart-wrap"><canvas id="analysis-chart" width="1280" height="460" aria-label="Telemetry time-series plot"></canvas><div id="chart-tooltip" class="chart-tooltip" hidden></div></div>
+        <p id="analysis-message" class="message">Export a run or load the current on-device CSV to begin.</p>
+      </article>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><p class="eyebrow">PERSISTENT NVS</p><h2>Configuration</h2></div>
+        <div class="config-heading-actions">
+          <span id="config-source">Waiting for device configuration</span>
+          <span id="config-lock" class="warning">Connect and remain DISARMED to edit</span>
+          <button id="disarm-for-config" class="danger" type="button" disabled>Disarm for config</button>
+          <button id="reload-config" type="button">Load saved config</button>
+        </div>
+      </div>
+      <div class="config-grid">
+        <form data-builder="logging-rate"><label>Logging rate (Hz)<input name="value" type="number" min="1" max="50" step="1" value="5"></label><button>Save</button></form>
+        <form data-builder="drivetrain"><label>Drivetrain<select name="value"><option>awd</option><option>fwd</option><option>rwd</option></select></label><div class="button-row"><button>Save</button><button id="cycle-drivetrain" type="button">Cycle</button></div></form>
+        <form data-builder="arm-latch"><label>Permanent arm latch<select name="value"><option value="on">Enabled until power loss</option><option value="off">Disabled — STOP disarms</option></select></label><button>Save</button></form>
+        <form data-builder="reverse"><label>Reverse limit (%)<input name="value" type="number" min="0" max="100"></label><button>Save</button></form>
+        <form data-builder="drive-smoothing"><label>Drive smoothing (%) — 0 off, 100 smoothest<input name="value" type="number" min="0" max="100" step="1"></label><button>Save</button></form>
+        <form data-builder="poles"><label>Motor poles (legacy)<input name="value" type="number" min="2" max="60" step="2"></label><button>Save</button></form>
+        <form data-builder="ppr"><label>RPM pulses/rev<input name="value" type="number" min="1" max="120"></label><button>Save</button></form>
+        <form data-builder="trim"><label>Steering trim (deg)<input name="value" type="number" min="-15" max="15" step="0.1"></label><button>Save</button></form>
+        <form data-builder="smoothing"><label>Steering smoothing (ms)<input name="value" type="number" min="0" max="500"></label><button>Save</button></form>
+        <form data-builder="speed-limit"><label>Speed steering limit<select name="value"><option value="on">On</option><option value="off">Off</option></select></label><button>Save</button></form>
+        <form data-builder="lateral-g"><label>Steering lateral ceiling (g)<input name="value" type="number" min="0.2" max="3" step="0.05"></label><button>Save</button></form>
+        <form data-builder="tv-enabled"><label>Torque vectoring<select name="value"><option value="enable">Enabled</option><option value="disable">Disabled</option></select></label><button>Save</button></form>
+        <form data-builder="tv-authority"><label>TV authority (%)<input name="value" type="number" min="0" max="25"></label><button>Save</button></form>
+        <form data-builder="front-relief"><label>Front relief (%)<input name="value" type="number" min="0" max="50"></label><button>Save</button></form>
+        <form data-builder="yaw-sign"><label>IMU yaw sign<select name="value"><option value="1">+1</option><option value="-1">-1</option></select></label><button>Save</button></form>
+        <form data-builder="failsafe"><label>Failsafe pulse / window<div class="inline"><input name="pulse" type="number" min="800" max="2200"><input name="window" type="number" min="1" max="100"></div></label><div class="button-row"><button>Save</button><button type="button" data-command="config failsafe off">Disable</button></div></form>
+        <form class="wide" data-builder="tv-gains"><label>TV gains: yaw target, turn RPM, yaw Kp, yaw Ki, RPM Kp<div class="gain-grid"><input name="yaw" type="number" min="0" max="500" step="1"><input name="turn" type="number" min="0" max="1" step="0.01"><input name="kp" type="number" min="0" max="0.01" step="0.00001"><input name="ki" type="number" min="0" max="0.01" step="0.00001"><input name="rpm" type="number" min="0" max="5" step="0.01"></div></label><button>Save gains</button></form>
+      </div>
+      <p id="message" class="message">No configuration command sent.</p>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

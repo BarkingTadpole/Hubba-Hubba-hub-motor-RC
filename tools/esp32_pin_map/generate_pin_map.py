@@ -109,6 +109,8 @@ SIGNAL_METADATA = {
     "PIN_RPM_RR_INPUT": ("Rear-right RPM", "rpm"),
     "PIN_IMU_I2C_SDA": ("IMU I2C SDA", "imu"),
     "PIN_IMU_I2C_SCL": ("IMU I2C SCL", "imu"),
+    "PIN_DRAGY_UART_RX": ("Dragy TX to ESP UART1 RX", "dragy"),
+    "PIN_DRAGY_UART_TX": ("ESP UART1 TX to Dragy RX", "dragy"),
 }
 
 COLORS = {
@@ -118,6 +120,7 @@ COLORS = {
     "rpm": "#267849",
     "imu": "#7055a3",
     "servo": "#c79a0a",
+    "dragy": "#0096c7",
     "other": "#59656b",
 }
 

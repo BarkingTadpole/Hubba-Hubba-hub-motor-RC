@@ -6,9 +6,8 @@
 #include "driver/i2c_master.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "pin_config.h"
+#include "sensor_i2c_bus.h"
 
 #define ISM330DHCX_ADDRESS 0x6A
 #define ISM330DHCX_WHO_AM_I 0x0F
@@ -21,9 +20,7 @@
 #define IMU_I2C_TIMEOUT_MS 10
 #define IMU_MUTEX_TIMEOUT_MS 5
 
-static i2c_master_bus_handle_t i2c_bus;
 static i2c_master_dev_handle_t imu_device;
-static SemaphoreHandle_t i2c_mutex;
 static imu_snapshot_t current_snapshot;
 static portMUX_TYPE snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
 static float gyro_z_bias_dps;
@@ -53,11 +50,11 @@ static bool read_motion(float gyro_dps[3], float accel_mps2[3])
     uint8_t raw[12];
 
     if (!initialized ||
-        xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(IMU_MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        !sensor_i2c_bus_lock(IMU_MUTEX_TIMEOUT_MS)) {
         return false;
     }
     esp_err_t err = read_registers(ISM330DHCX_OUTX_L_G, raw, sizeof(raw));
-    xSemaphoreGive(i2c_mutex);
+    sensor_i2c_bus_unlock();
     if (err != ESP_OK) {
         return false;
     }
@@ -78,20 +75,7 @@ esp_err_t imu_sensor_init(int8_t yaw_sign)
     }
     configured_yaw_sign = yaw_sign;
 
-    i2c_mutex = xSemaphoreCreateMutex();
-    if (i2c_mutex == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    i2c_master_bus_config_t bus_config = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = PIN_IMU_I2C_SDA,
-        .scl_io_num = PIN_IMU_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = false,
-    };
-    esp_err_t err = i2c_new_master_bus(&bus_config, &i2c_bus);
+    esp_err_t err = sensor_i2c_bus_init();
     if (err != ESP_OK) {
         return err;
     }
@@ -101,7 +85,7 @@ esp_err_t imu_sensor_init(int8_t yaw_sign)
         .device_address = ISM330DHCX_ADDRESS,
         .scl_speed_hz = 400000,
     };
-    err = i2c_master_bus_add_device(i2c_bus, &device_config, &imu_device);
+    err = sensor_i2c_bus_add_device(&device_config, &imu_device);
     if (err != ESP_OK) {
         return err;
     }

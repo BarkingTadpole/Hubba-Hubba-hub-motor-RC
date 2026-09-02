@@ -227,25 +227,30 @@ static float scaled_to_float(uint32_t value)
 void config_store_load_drive(drive_config_t *config)
 {
     *config = (drive_config_t){
-        .reverse_limit_percent = 10,
+        .drivetrain_mode = DRIVETRAIN_AWD,
+        .reverse_limit_percent = DEFAULT_REVERSE_LIMIT_PERCENT,
+        .drive_smoothing_percent = DEFAULT_DRIVE_SMOOTHING_PERCENT,
         .receiver_failsafe_enabled = DEFAULT_RC_THROTTLE_FAILSAFE_ENABLED != 0,
         .receiver_failsafe_us = DEFAULT_RC_THROTTLE_FAILSAFE_US,
         .receiver_failsafe_window_us = DEFAULT_RC_THROTTLE_FAILSAFE_WINDOW_US,
         .motor_poles = 14,
         .rpm_pulses_per_revolution = 7,
         .steering_trim_tenths_deg = 0,
-        .steering_smoothing_ms = 60,
+        .steering_smoothing_ms = DEFAULT_STEERING_SMOOTHING_MS,
         .steering_speed_limit_enabled = DEFAULT_STEERING_SPEED_LIMIT_ENABLED != 0,
         .steering_lateral_accel_g = DEFAULT_STEERING_LATERAL_ACCEL_G,
-        .torque_vectoring_enabled = false,
-        .tv_authority_percent = 10,
+        .torque_vectoring_enabled = DEFAULT_TV_ENABLED != 0,
+        .tv_authority_percent = DEFAULT_TV_AUTHORITY_PERCENT,
         .tv_front_relief_percent = DEFAULT_TV_FRONT_RELIEF_PERCENT,
         .tv_turn_yaw_gain_dps = 180.0f,
         .tv_turn_rpm_gain = 0.20f,
         .tv_yaw_kp = 0.00025f,
         .tv_yaw_ki = 0.00004f,
         .tv_rpm_kp = 0.20f,
-        .imu_yaw_sign = 1,
+        .imu_yaw_sign = DEFAULT_IMU_YAW_SIGN,
+        .permanent_arm_latch_enabled =
+            DEFAULT_PERMANENT_ARM_LATCH_ENABLED != 0,
+        .telemetry_log_rate_hz = DEFAULT_TELEMETRY_LOG_RATE_HZ,
     };
 
     nvs_handle_t nvs;
@@ -258,8 +263,14 @@ void config_store_load_drive(drive_config_t *config)
     int16_t i16 = 0;
     int8_t i8 = 0;
 
+    if (nvs_get_u8(nvs, "drive_mode", &u8) == ESP_OK && u8 <= DRIVETRAIN_RWD) {
+        config->drivetrain_mode = (drivetrain_mode_t)u8; found = true;
+    }
     if (nvs_get_u8(nvs, "rev_limit", &u8) == ESP_OK && u8 <= 100) {
         config->reverse_limit_percent = u8; found = true;
+    }
+    if (nvs_get_u8(nvs, "drive_smooth", &u8) == ESP_OK && u8 <= 100) {
+        config->drive_smoothing_percent = u8; found = true;
     }
     if (nvs_get_u8(nvs, "fs_en", &u8) == ESP_OK && u8 <= 1) {
         config->receiver_failsafe_enabled = u8 != 0; found = true;
@@ -322,6 +333,12 @@ void config_store_load_drive(drive_config_t *config)
     if (nvs_get_i8(nvs, "imu_sign", &i8) == ESP_OK && (i8 == -1 || i8 == 1)) {
         config->imu_yaw_sign = i8; found = true;
     }
+    if (nvs_get_u8(nvs, "arm_latch", &u8) == ESP_OK && u8 <= 1) {
+        config->permanent_arm_latch_enabled = u8 != 0; found = true;
+    }
+    if (nvs_get_u8(nvs, "log_hz", &u8) == ESP_OK && u8 >= 1 && u8 <= 50) {
+        config->telemetry_log_rate_hz = u8; found = true;
+    }
     nvs_close(nvs);
     config->loaded_from_nvs = found;
 }
@@ -332,7 +349,9 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     esp_err_t err = open_namespace("cfg", NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
 
-    err = nvs_set_u8(nvs, "rev_limit", config->reverse_limit_percent);
+    err = nvs_set_u8(nvs, "drive_mode", (uint8_t)config->drivetrain_mode);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "rev_limit", config->reverse_limit_percent);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "drive_smooth", config->drive_smoothing_percent);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "fs_en", config->receiver_failsafe_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_us", config->receiver_failsafe_us);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_window", config->receiver_failsafe_window_us);
@@ -351,6 +370,8 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     if (err == ESP_OK) err = nvs_set_u32(nvs, "yaw_ki", float_to_scaled(config->tv_yaw_ki));
     if (err == ESP_OK) err = nvs_set_u32(nvs, "rpm_kp", float_to_scaled(config->tv_rpm_kp));
     if (err == ESP_OK) err = nvs_set_i8(nvs, "imu_sign", config->imu_yaw_sign);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "arm_latch", config->permanent_arm_latch_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "log_hz", config->telemetry_log_rate_hz);
     if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;

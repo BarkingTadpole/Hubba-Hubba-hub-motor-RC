@@ -15,16 +15,18 @@ Receiver CH1 now enters the ESP32 on GPIO16. The firmware validates and
 relays that command to the steering servo from GPIO32. A missing CH1 signal
 or the configured transmitter-off throttle pulse centers the servo.
 
-With torque vectoring disabled, all four ESCs receive identical throttle and
-reverse commands. With torque vectoring active, reverse/direction remains
-identical but the four throttle outputs may differ by a guarded correction.
+Normal drive can select AWD, FWD, or RWD. AWD is the default. With torque
+vectoring disabled, the selected driven wheels receive identical throttle and
+reverse commands while every inactive axle receives safe PWM. With torque
+vectoring active, the driven left/right outputs may differ by a guarded
+correction.
 
 ## 2. Operating Modes
 
 - `DISARMED`: all throttle outputs are `1100 us`; all reverse outputs are
   `1100 us`.
 - `DRIVE_ARMED`: receiver throttle is mapped to the ESC range and sent
-  through the drive and optional vectoring controller.
+  through the selected AWD/FWD/RWD drive and optional vectoring controller.
 - `ESC_CAL_ARMED`: calibration prepared, safe outputs active.
 - `ESC_CAL_MAX`: all throttle outputs `1940 us`, reverse outputs `1100 us`.
 - `ESC_CAL_MIN`: all throttle and reverse outputs `1100 us`.
@@ -62,6 +64,22 @@ that service before calling the update API. Installation failure is returned
 to `app_main`, which keeps the application in its non-driving startup error
 loop. The service is a driver requirement, not a commanded throttle fade and
 does not alter the 50 Hz pulses or pin map.
+
+The persistent drivetrain selection affects normal `DRIVE_ARMED` output only:
+
+- `AWD`: all four wheels are driven.
+- `FWD`: only FL and FR are driven; RL and RR remain at `1100/1100 us`.
+- `RWD`: only RL and RR are driven; FL and FR remain at `1100/1100 us`.
+
+Inactive-wheel reverse/direction stays low even when the driven axle is in
+reverse. ESC endpoint calibration and manual relay intentionally continue to
+address all four ESCs so hardware can be configured without changing modes.
+An invalid runtime mode masks every wheel to safe output.
+Select the persistent mode before arming with:
+
+```text
+config drivetrain <awd|fwd|rwd>
+```
 
 ## 3. Pin Assignment
 
@@ -122,6 +140,31 @@ GPIO34 through GPIO39 are input-only and have no internal pull-ups.
 | INT1, unused | Not connected |
 | INT2, unused | Not connected |
 
+### Dragy Lite GPS and Compass Harness
+
+| Dragy wire | Function | ESP32 connection |
+|---|---|---|
+| Yellow | UART TX | GPIO4, UART1 RX |
+| White | UART RX | GPIO5, UART1 TX |
+| Blue | I2C SDA | GPIO23, shared with IMU |
+| Green | I2C SCL | GPIO22, shared with IMU |
+| Black | Ground | Common ground |
+| Red | Power | Regulated 5-16 V rail, not a GPIO |
+
+UART1 is routed through the ESP32 GPIO matrix so UART0 remains available for
+USB flashing and the 115200-baud CLI. A receive-only installation needs only
+Dragy yellow TX to GPIO4 and common ground. GPIO5 is a boot-strapping pin; do
+not add a pull-up/down, and confirm that the Dragy RX input is high impedance
+during ESP32 reset. If that connection causes unreliable boot, leave the
+white wire disconnected until a non-strapping output can be freed.
+
+GPIO23/GPIO22 remain a single 400 kHz bus rather than two independent I2C
+controllers. The ISM330DHCX address is `0x6A`; the MAX-M10S address is `0x42`
+if the Dragy exposes the GNSS receiver on its harness I2C bus. Measure both
+UART and I2C logic-high voltages before connection. I2C pull-ups must reference
+3.3 V, address conflicts are not allowed, and parallel pull-ups must not make
+the total resistance too low.
+
 The firmware polls the IMU over I2C at 200 Hz. Interrupt pins are not used
 in this version. `CONFIG_FREERTOS_HZ=1000` is required so the 5 ms sensor
 period converts to a nonzero FreeRTOS delay; the firmware also enforces this
@@ -165,7 +208,7 @@ The servo starts at the saved steering center, follows valid CH1 commands at
 50 Hz subject to its speed-sensitive envelope, clamps commands to the
 calibrated left/right endpoints, and applies
 the steering deadband at center. A configurable first-order command filter
-smooths valid requests; its default time constant is `60 ms` and `0 ms`
+smooths valid requests; its default time constant is `10 ms` and `0 ms`
 disables it. Before smoothing, a median filter uses the latest three distinct
 receiver frames and rejects one isolated valid-looking pulse anywhere in the
 steering range. A monotonic or stepped real command emerges one receiver frame
@@ -201,9 +244,10 @@ monitoring is not needed.
 
 Missing CH1 returns the servo to the trimmed center immediately rather than
 ramping through the filter. A matching CH2 transmitter-off pulse does the
-same when the optional throttle-pulse detector is enabled. Either CH4
-STOP/OFF position disables motor power but does not disable valid steering
-control. Configuration changes are accepted only while disarmed:
+same when the optional throttle-pulse detector is enabled. CH4 STOP/OFF does
+not disable otherwise-valid steering control. It either temporarily inhibits
+motor output or returns drive to `DISARMED` according to the saved arm policy.
+Configuration changes are accepted only while `DISARMED`:
 
 ```text
 config steering trim <-15..15>
@@ -291,6 +335,12 @@ separate low-speed LEDC group. This separation reduces interference between
 receiver capture and output updates. Signal freshness expires after 100 ms
 without a completed valid pulse.
 
+The GPIO interrupt service is allocated with `ESP_INTR_FLAG_IRAM`, and the
+IRAM handler reads the ESP32 GPIO input registers directly. This keeps both
+edges of each receiver pulse observable while internal-flash logging disables
+the flash cache; otherwise a delayed edge can still fall inside the accepted
+`800-2200 us` range and appear to be a real but impossible steering command.
+
 Earlier MCPWM and RMT capture experiments are not approved for use. MCPWM
 allowed channels to become stale when throttle changed. The RMT version caused
 an unsafe forward/pause cycle, servo jolts, and ignored CH4 shutdown during a
@@ -377,9 +427,15 @@ reverse:
     reverse  = 1940 us
 ```
 
-The default reverse limit is 10 percent. A direction change first ramps
-throttle to minimum, holds for 120 ms, changes the reverse outputs, and then
-ramps back up. A neutral receiver command ramps magnitude down but retains the
+The user-requested default reverse limit is 100 percent. Persistent drive
+smoothing ranges from 0 to 100 percent and defaults to 100 percent. At 100,
+the smoothest established ramp uses 12 us acceleration and 100 us deceleration
+steps per 20 ms update. Lower percentages shorten both ramp durations using
+`ceil(smoothest_step * 100 / smoothing_percent)`; 50 percent therefore uses
+24/200 us steps. Zero disables both ramps and applies the requested magnitude
+on the next drive update. A direction change still reaches throttle minimum,
+holds for 120 ms, changes the reverse outputs, and then applies the new
+direction at every smoothing setting. A neutral receiver command retains the
 current yellow-wire direction; it never flips the direction output while the
 ESC throttle pulse is above minimum. The ESC output module clamps every write
 to the configured endpoint ranges as a final boundary check.
@@ -477,9 +533,9 @@ Compiled receiver defaults are centralized in `main/default_config.h`:
 | Torque vectoring | OFF | `2047 us` |
 | Torque vectoring | STRAIGHT | `1513 us` |
 | Torque vectoring | FULL | `981 us` |
-| Shutdown | RUN/ON | `983 us` |
-| Shutdown | STOP/OFF 1 | `2049 us` |
-| Shutdown | STOP/OFF 2 | `1515 us` |
+| Arm/output inhibit | RUN/ON | `983 us` |
+| Arm/output inhibit | STOP/OFF 1 | `2049 us` |
+| Arm/output inhibit | STOP/OFF 2 | `1515 us` |
 
 The default throttle deadband remains `80 us` and the steering deadband is
 `30 us`. Valid NVS calibration overrides these compiled values. Compiled
@@ -489,10 +545,13 @@ calibration before drive can arm.
 Drive arming requires saved throttle and CH4 calibrations. Steering and CH5
 calibration are required only before enabling torque vectoring.
 
-## 8. Receiver Shutdown and Failsafe
+## 8. Receiver Arm Policy and Output Inhibits
 
 CH4 replaces the former physical GPIO switch. It is a three-position switch
-calibrated as one RUN/ON position and two STOP/OFF positions.
+calibrated as one RUN/ON position and two STOP/OFF positions. The persistent
+`cfg/arm_latch` option selects whether a successful arm remains latched for the
+boot or returns to `DISARMED` on subsequent safety events. Permanent latching
+is enabled by default for backward compatibility.
 
 Normal arming:
 
@@ -503,25 +562,43 @@ Normal arming:
 
 The 250 ms pre-arm qualification prevents a short receiver-wide PWM gap after
 a switch transition from occurring just after drive entry. Any invalid CH4 or
-throttle sample restarts the qualification timer. It does not change
-armed-state shutdown timing.
+throttle sample restarts the qualification timer.
 
-The controller disarms immediately in either learned STOP/OFF position. CH4
-PWM loss disarms after the 100 ms receiver timeout. A pulse outside all three
-learned positions must persist for 60 ms before it disarms, preventing one
-malformed PWM frame from causing a false shutdown. On boot or after signal
-loss, a recognized STOP/OFF observation followed by RUN/ON is required. The
-same cycle is required after the optional throttle-pulse detector triggers.
+With permanent latching enabled, `SYSTEM_DRIVE_ARMED` remains set until reset
+or power loss. Either learned STOP/OFF position immediately applies safe ESC
+outputs without changing that state. CH4 or throttle loss applies the same
+inhibit after the 100 ms receiver timeout. When valid CH4 RUN and throttle
+data return, the inhibits clear automatically and throttle restarts from
+minimum through the acceleration ramp; no new arm cycle or neutral check is
+required, so the operator must return throttle to neutral before recovery.
 
-CH4 is processed by the ESP32 and therefore is not a hardware emergency stop.
-Testing must retain direct access to traction-power isolation. A final vehicle
-should have an independent physical means to remove ESC power or disable the
-ESCs even if the ESP32 is stalled.
+With permanent latching disabled, recognized STOP, CH4 or throttle loss, a
+confirmed unrecognized CH4 position, and a matching configured throttle
+failsafe return to `SYSTEM_DISARMED`. The controller then requires another
+healthy STOP/OFF observation and STOP/OFF-to-RUN/ON transition, including the
+250 ms RUN/neutral qualification. In both policies, an unrecognized pulse must
+persist for 60 ms before action so one malformed frame is rejected.
+
+CH4 is processed by the ESP32 and is not a hardware emergency stop. The CLI
+`disarm` command creates a non-clearable safe-output inhibit for the rest of
+the boot when permanent latching is enabled; when disabled it performs a
+normal disarm. The exact `disarm config` maintenance command is the deliberate
+exception: from `DRIVE_ARMED` it immediately commands safe output, returns to
+`SYSTEM_DISARMED`, and requires a new physical CH4 STOP/OFF-to-RUN/ON cycle
+before drive can rearm. It is available from serial and as the dashboard's
+one-way **Disarm for config** action, but neither interface can rearm remotely.
+Testing must retain direct traction-power isolation in either policy. A final
+vehicle must independently remove ESC power or disable the ESCs even if the
+ESP32 is stalled.
+
+`config arm-latch <on|off>` changes the policy only in `DISARMED`, saves it to
+NVS, and applies it to the next arm without a reboot. `status` reports the
+selected policy, whether drive output is active or inhibited, the current
+inhibit reason, a cumulative inhibit-event count, and the last reason.
 
 Each learned switch position has a `+/-125 us` recognition window. A pulse
 outside all three windows is unrecognized: after the 60 ms confirmation it
-disarms the drive and cannot satisfy the STOP/OFF observation required for
-rearming.
+temporarily inhibits or fully disarms according to the selected policy.
 
 Configure the R7FG failsafe so:
 
@@ -530,19 +607,17 @@ Configure the R7FG failsafe so:
 - CH4 commands either learned STOP/OFF position.
 - CH5 commands OFF.
 
-The optional fixed throttle-pulse detector is disabled by default. The legacy
-measured CH2 transmitter-off value was `1565 us`; detecting that specific
-held pulse can be enabled with:
+The fixed throttle-pulse detector defaults enabled for the measured CH2
+transmitter-off value of `1565 us` with a `10 us` window:
 
 ```text
 config failsafe 1565 10
 ```
 
-Disable the detector again with `config failsafe off`. When enabled and the
-configured pulse is detected, safe ESC outputs are applied immediately and
-the drive state disarms after a 60 ms confirmation. Complete PWM loss is
-declared after 100 ms regardless of this setting. CH4 STOP/OFF, missing CH4,
-and unrecognized CH4 positions also remain active regardless of this setting.
+Disable the detector again with `config failsafe off`. When enabled, the
+configured pulse immediately applies safe output. It is a recoverable inhibit
+with permanent latching enabled and a full disarm when disabled. Complete PWM
+loss is declared after 100 ms regardless of this setting.
 
 ## 9. Laptop ESC Calibration
 
@@ -573,23 +648,26 @@ stops it when that detector is enabled.
 
 ## 10. Torque-Vectoring Controller
 
-Torque vectoring defaults to disabled. The baseline OFF mode always sends
-the same throttle to all four ESCs.
+Torque vectoring is configured enabled in the requested first-boot profile,
+but runtime prerequisites and CH5 still gate activity. The baseline OFF mode
+always sends the same throttle to all four ESCs.
 
 Before `tv enable` is accepted during a boot:
 
 - `cal steering` and `cal tv` must be stored.
 - The five-second startup calibration or a later `cal imu` retry must succeed
   with the car level and stationary.
-- Every RPM input must have produced valid pulses. Use `monitor rpm` and
-  rotate each wheel.
+- Every selected driven-wheel RPM input must have produced valid pulses. Use
+  `monitor rpm` and rotate the driven wheels. Validate all four channels
+  before changing drivetrain modes.
 - The sensor task must have started successfully.
 
 IMU gyro bias is intentionally calibrated each boot because temperature and
 mounting bias drift. If IMU or RPM data becomes invalid while driving, if an
-input/configuration becomes non-finite, or if any RPM raw frequency is below
-`16.7 Hz`, the controller immediately resets its integral and falls back to
-equal throttle outputs.
+input/configuration becomes non-finite, or if any selected driven RPM raw
+frequency is below `16.7 Hz`, the controller immediately resets its integral
+and falls back to equal throttle on the driven wheels. The inactive axle
+remains safe.
 
 `monitor imu` only reads the latest snapshot and reports whether its bias is
 calibrated. It never invokes calibration. USB serial programs may toggle the
@@ -599,8 +677,9 @@ terminal with DTR/RTS reset disabled to attach without rebooting.
 
 ### CH5 Modes
 
-- OFF: equal four-wheel commands. A CH5 pulse outside all three learned
-  `+/-125 us` windows is also treated as OFF.
+- OFF: equal commands on the selected driven wheels, with the inactive axle
+  safe. A CH5 pulse outside all three learned `+/-125 us` windows is also
+  treated as OFF.
 - STRAIGHT: active only while steering is within 6 percent of center. Target
   yaw rate and left/right RPM difference are both zero.
 - FULL: steering creates empirical target yaw rate and left/right RPM
@@ -619,7 +698,9 @@ RL = base + correction
 RR = base - correction
 ```
 
-The controller uses:
+The controller uses selected driven-wheel RPM: both axles in AWD, the front
+pair in FWD, or the rear pair in RWD. It then applies correction only to the
+selected driven wheels:
 
 ```text
 curve_steering = average_road_wheel_angle / direction_specific_max_angle
@@ -650,9 +731,10 @@ RR = base - correction
 ```
 
 Front relief defaults to `20%` of full ESC span and only operates while FULL
-mode is active. It deliberately reduces total requested power instead of
-immediately transferring power rearward. OFF and STRAIGHT do not apply it.
-Configure it while disarmed with `config tv front-relief <0-50>`.
+mode is active in AWD or FWD. It deliberately reduces total requested power
+instead of immediately transferring power rearward. RWD forces it to zero
+because the front axle is already inactive. OFF and STRAIGHT do not apply it.
+Configure it while `DISARMED` with `config tv front-relief <0-50>`.
 
 The sign convention is internally consistent: positive steering and positive
 yaw both mean a right turn, and positive correction adds left-side torque
@@ -661,21 +743,21 @@ held when the requested correction is saturated and additional integration
 would drive farther into saturation. This is anti-windup for the existing
 controller; it does not make the empirical yaw target a vehicle model.
 
-Side correction defaults to at most `+/-10%` of full throttle span. Left and
+Side correction defaults to at most `+/-25%` of full throttle span. Left and
 right side corrections are equal and opposite. FULL-mode front relief is a
 separate non-balanced reduction, so mean requested power intentionally falls
 as lateral demand increases. Outputs remain clamped to the ESC range.
 
-Vectoring is forward-only in this version. Reverse always uses equal
-throttle.
+Vectoring is forward-only in this version. Reverse always uses equal throttle
+on the selected driven axle, and the inactive axle remains safe.
 
 Initial tuning commands:
 
 ```text
-config tv authority 10
+config tv authority 25
 config tv front-relief 20
 config tv gains 180 0.20 0.00025 0.00004 0.20
-config imu yaw-sign 1
+config imu yaw-sign -1
 ```
 
 Use `monitor imu` and rotate the car right by hand. If reported yaw is
@@ -692,6 +774,8 @@ at low speed, starting with authority at 2 to 5 percent.
 - `config_store.c`: owns defaults and NVS persistence.
 - `cornering_control.c`: converts rear RPM to speed and calculates the
   steering envelope and lateral demand.
+- `drivetrain_control.c`: validates AWD/FWD/RWD selection and masks inactive
+  axle outputs to safe PWM.
 - `rc_input.c`: captures CH1, CH2, CH4, and CH5 PWM with priority-3 GPIO edge
   interrupts on CPU0.
 - `esc_output.c`: generates eight independent 50 Hz LEDC outputs.
@@ -702,13 +786,230 @@ at low speed, starting with authority at 2 to 5 percent.
   curves and converts their sign convention for controller use.
 - `rpm_sensor.c`: owns four hardware PCNT units and RPM conversion.
 - `imu_sensor.c`: configures and reads the ISM330DHCX over I2C.
+- `sensor_i2c_bus.c`: owns the shared 400 kHz I2C bus and serializes IMU,
+  discovery, and future compass transactions.
+- `dragy_nmea.c`: validates NMEA checksums and parses RMC, GGA, and VTG fields.
+- `dragy_sensor.c`: owns UART1 GPS reception, stale-data state, and the
+  startup shared-I2C address scan.
+- `remote_command.c`: parses the configuration/TV subset, exact guided
+  calibration operations, and the one-way `disarm config` maintenance action
+  permitted over the network. It rejects drive, arm, ordinary disarm,
+  monitoring, and arbitrary command text.
+- `telemetry_log.c`: samples thread-safe controller/Dragy snapshots from a
+  low-priority task and owns the wear-levelled FAT CSV file.
 - `torque_vectoring.c`: contains the sensor controller and balanced wheel
   correction.
 - `powertrain_controller.c`: owns system state, arming, failsafe, mapping,
   calibration flows, and task scheduling.
+- `wifi_control.c`: owns the WPA2 SoftAP and embedded dashboard/guarded HTTP
+  API server.
 - `pin_config.h`: is the single source of truth for physical pin assignment.
 
-## 12. Bench-Test Order
+## 12. ESP32 SoftAP and On-Device Viewer
+
+Wi-Fi defaults enabled under the `RC car Wi-Fi access point` project menu.
+After the powertrain, logger, and serial CLI start, the ESP32 creates a 2.4 GHz
+WPA2 SoftAP instead of associating with an upstream WLAN. The tracked
+development defaults are SSID `RC-Car-ESP32`, password `rc-car-viewer`, channel
+1, four clients, and HTTP port 80. Normal access is `http://192.168.4.1`; the
+ESP32 DHCP server supplies client addresses. There is no Python process,
+station DHCP, UDP discovery, or separate TCP telemetry session in normal use.
+
+The ESP-IDF HTTP server runs at priority 2 with an 8 KiB task stack. Receiver
+edge interrupts remain priority 3 and the powertrain task remains pinned to
+CPU1. The browser requests telemetry every 250 ms, and formatting occurs only
+in the HTTP task; no network operation runs in the 20 ms drive loop. Wi-Fi or
+HTTP initialization failure is non-fatal to the powertrain and leaves USB
+serial operation available. The expanded state JSON uses a dedicated static
+8 KiB buffer rather than the task stack.
+
+The firmware embeds `index.html`, `app.js`, and `style.css` from
+`tools/wifi_bridge/web`. Its direct HTTP surface is:
+
+- `GET /`, `/index.html`, `/app.js`, `/style.css`: embedded viewer assets.
+- `GET /api/state`: protocol-version-1 telemetry JSON containing controller
+  state, receiver, steering, RPM, IMU, Dragy, vectoring, outputs, logging, and
+  non-secret persistent configuration.
+- `GET /api/config`: current configuration plus NVS/default source.
+- `POST /api/config`: guarded configuration command JSON.
+- `POST /api/calibration`: exact guarded calibration command JSON.
+- `POST /api/disarm`: exact one-way `disarm config` maintenance action.
+- `GET /api/log.csv`: a fixed-starting-size CSV snapshot streamed directly in
+  8 KiB chunks.
+- `POST /api/log/clear`: explicitly clear/recover logging storage; firmware
+  rejects it unless the controller is `DISARMED`.
+
+The accepted command subset matches the documented `config ...` commands,
+`tv enable|disable`, the exact one-way maintenance action `disarm config`, and
+these exact calibration operations: `cal receiver`, `cal steering`, `cal arm`,
+`cal tv`, `cal imu`, `cal capture`, `cal esc arm|max|min`, `cal manual`, and
+`cal cancel`. `remote_command_parse` has no arm, ordinary disarm, drive
+throttle, steering output, `monitor ...`, or arbitrary terminal operation. The
+maintenance action immediately applies safe ESC output and returns
+`DRIVE_ARMED` to `DISARMED`; drive can rearm only after a physical CH4
+STOP/OFF-to-RUN/ON cycle and its normal neutral qualification.
+
+Browser receiver calibration remains a controller-owned state machine. Each
+`cal capture` averages the requested channel for 1500 ms and only a complete,
+validated three-position set replaces NVS. IMU capture uses the existing
+two-second current-boot stationary bias retry. Configuration is rejected while
+any calibration is active. Browser receiver/IMU workflows expire after 120
+seconds, while ESC calibration/manual modes retain their 30-second timeout and
+all neutral, CH4 STOP, receiver-loss, reverse-low, and failsafe guards.
+
+The existing controller setters remain authoritative: configuration and
+calibration start require `DISARMED`, TV enablement still requires live sensor
+prerequisites, and NVS write success is required before HTTP reports success.
+The dashboard's read-only configuration view remains available while armed.
+Its confirmed **Disarm for config** action cannot arm and does not bypass the
+physical rearm cycle.
+
+There is no application-level login beyond WPA2 association. Treat the AP
+password as a control credential and change the tracked development default
+before operation around untrusted clients. `tools/wifi_bridge/bridge.py`
+remains only for mock/frontend development and is not part of the runtime
+architecture.
+
+The Wi-Fi radio adds current bursts and RF/network tasks. Validate ESP32 supply
+voltage and reset behavior with the SoftAP active and viewers polling before
+powered driving; a successful compile or browser mock test is not
+power-integrity or radio validation.
+
+## 13. Dragy Lite GPS Integration
+
+Enable `Dragy Lite GPS` at build time. UART1 uses `9600 8N1` by
+default because that is the MAX-M10S reset configuration; select the actual
+Dragy output rate if its firmware uses another value. The fixed-buffer parser
+accepts checksum-valid RMC, GGA, and VTG sentences from any NMEA talker prefix.
+It reports fix, latitude/longitude, ground speed, course, altitude, satellites,
+HDOP, UTC/date, byte counts, and parser errors. GPS data becomes stale after
+1.5 seconds without a recognized sentence. No GPS field participates in the
+real-time drive or torque-vectoring path.
+
+`monitor gps` provides a 30-second read-only serial diagnostic for UART bytes,
+NMEA freshness, fix/position, ground speed, course, altitude, satellites/HDOP,
+and parser errors. `monitor dragy` is an alias. GPS course over ground is not
+magnetic compass heading.
+
+`monitor gps raw` (`monitor dragy raw`) resets only a diagnostic RAM capture,
+waits five seconds while the normal UART parser continues, and prints the most
+recent 512 received bytes in hex and ASCII. Use it when byte counts increase
+but valid NMEA sentence counts do not, to identify readable text, a baud-rate
+mismatch, or a binary/proprietary stream without transmitting to the Dragy.
+
+Compass integration is deferred. As retained discovery groundwork, after the IMU/shared bus initializes and before periodic sensor tasks start,
+the firmware scans valid 7-bit I2C addresses once. It reports the address list
+over serial and in Wi-Fi telemetry, recognizes `0x6A` as the known IMU, and
+flags every other response as a compass candidate. Power the Dragy before the
+ESP32 for this discovery pass. Although the MAX-M10S normally uses `0x42`, the
+official Dragy harness graphic labels the exposed blue/green pair specifically
+as the compass connection, so candidate detection does not exclude `0x42`.
+Scanning is intentionally not repeated while driving because probing every
+address could interfere with 200 Hz IMU service. An unavailable I2C bus logs a
+warning but cannot prevent the independent UART GPS task from starting.
+
+Dragy's public product material labels the compass output but does not publish
+the compass device, address, register map, or heading protocol. Its official
+developer page requires program registration for integration access.
+Discovery is therefore implemented, but heading reads remain disabled until
+the registered SDK/device documentation or a positively identified protocol
+is available. Do not infer a common magnetometer model from an address alone.
+
+Sources: [Dragy Lite](https://www.godragy.com/dragy-lite/) and
+[Dragy developer registration](https://www.godragy.com/dragy-api/), plus the
+[MAX-M10S data sheet](https://content.u-blox.com/sites/default/files/MAX-M10S_DataSheet_UBX-20035208.pdf).
+
+## 14. Offline CSV Telemetry and Browser Analysis
+
+The custom 4 MB flash layout is:
+
+| Partition | Offset | Size | Purpose |
+|---|---:|---:|---|
+| NVS | `0x9000` | `0x6000` | calibration, drive configuration, Wi-Fi framework data |
+| PHY init | `0xf000` | `0x1000` | radio initialization data |
+| factory | `0x10000` | `0x140000` | 1.25 MiB firmware application |
+| logdata | `0x150000` | `0x2b0000` | 2.75 MiB raw wear-levelled FAT CSV storage |
+
+The logger is enabled through `RC car offline telemetry log` and defaults to a
+1 Hz (1000 ms) sample interval. It runs at priority 1 on CPU0, below the HTTP
+task and receiver interrupts. It obtains the public, mutex-protected
+`powertrain_remote_snapshot_t` plus the Dragy snapshot. Flash formatting,
+stdio, FAT calls, and file export never run in the priority drive task or the
+receiver edge interrupt.
+
+`config logging rate <1-50>` changes the sampling rate while `DISARMED`.
+The live viewer exposes the same control in its Configuration section. The
+validated value is stored as `cfg/log_hz` in NVS, applies without rebooting,
+and remains authoritative when the ESP32 is disconnected from Wi-Fi.
+
+The append-only `telemetry.csv` uses schema version 1 and 128 columns. It
+records boot/sample identity, state/inhibit data, all receiver inputs,
+steering/filter/road-wheel values, every RPM channel and raw measurement,
+all IMU axes, TV internals, every ESC throttle/reverse output, Dragy GPS/parser
+data, and the configuration context. Text fields are sanitized so a comma,
+quote, or newline cannot change column alignment. A boot ID disambiguates the
+monotonic uptime reset between power cycles.
+
+Wi-Fi is not part of the record path. Disconnecting every AP client does not
+stop or drop CSV samples; after reconnection the on-device HTTP server reads a
+fixed starting size in 8 KiB chunks and exposes one browser download.
+The writer is flushed before each read. The active file may continue growing,
+but a download returns exactly the size captured at its start. Log clear is an
+explicit destructive action, requires browser confirmation, and is accepted
+only in `DISARMED`.
+
+A CSV containing only the 1,956-byte schema header represents zero samples.
+The viewer reports that condition without attempting to plot it. If the FAT
+volume simultaneously reports a known capacity but no usable free clusters,
+the UI changes the confirmed action to `Recover log storage`. Firmware first
+deletes the CSV normally; if the 16 KiB reserve is still unavailable, it
+formats only the dedicated `logdata` FAT volume, recreates the header, and
+resumes logging. Firmware, NVS, and calibration partitions are outside that
+operation.
+
+If append or flush I/O fails, the logger latches a storage-fault flag, records
+the underlying `errno`, and stops issuing further writes. Export first attempts
+to flush but does not make that failure fatal to recovery: it obtains the
+actual committed size with `stat()` and reads through a separate read-only
+stream. This permits salvage of an intact prefix after a full or damaged FAT
+filesystem. A known capacity with zero free bytes is treated as full. Clear or
+reformat remains an explicit destructive recovery step after export.
+
+Internal storage is bounded. The firmware maintains a 16 KiB free-space
+reserve and stops recording rather than overwriting old data. It reports
+mounted/recording/full/faulted state, the last storage `errno`, sample and error
+counters, file size, actual FAT capacity and remaining bytes in live telemetry.
+A representative 600-800 byte
+row at the default 1 Hz yields about 60-80 minutes, but FAT overhead and numeric widths make
+the real value variable; the dashboard derives a live estimate from observed
+bytes per sample. A 50 Hz selection has roughly one fifth that retention.
+Indefinite lossless logging requires microSD or larger external flash.
+
+Buffered rows are flushed and `fsync`ed at least once per second. This protects
+data across Wi-Fi outages, not arbitrary power removal: sudden controller
+power loss can lose the final buffered second and can corrupt FAT. Absolute
+power-loss durability requires hardware hold-up plus a journaled/transactional
+record design. Mount failure currently allows reformatting the dedicated log
+partition so a corrupt filesystem does not block the powertrain; that recovery
+can erase damaged logs and must be treated separately from network-offline
+retention.
+
+Low task priority does not make internal-flash erase/program latency disappear:
+ESP32 cache/flash critical sections can delay otherwise unrelated work. Before
+powered driving, fill and flush the logger with traction disconnected while
+watching powertrain deadline-overrun counters, minimum stack/heap, receiver
+capture, PWM stability, supply voltage, and resets. If worst-case control
+timing is not clean, disable internal logging or move the recorder to external
+storage; do not weaken drive safety timing to accommodate logging.
+
+The local browser analysis tool never uploads the CSV. It parses only complete
+128-column rows, joins power-cycle segments into one elapsed-time view,
+summarizes duration/peak speed/peak RPM, and plots unit-compatible project
+groups: vehicle/GPS speed, wheel RPM, receiver PWM, steering geometry, yaw,
+ESC output, TV correction, and IMU acceleration. Rendering may downsample
+points for responsiveness; export preserves every recorded row.
+
+## 15. Bench-Test Order
 
 1. Test with traction power disconnected and inspect all nine PWM outputs.
 2. Calibrate and monitor each receiver channel.
@@ -719,17 +1020,42 @@ at low speed, starting with authority at 2 to 5 percent.
    reported speed and steering limit before motor power is connected. Abort if
    the wheel-local sign conversion,
    centered toe-out, or measured angles differ.
-4. Verify both CH4 STOP/OFF positions disarm from every drive state while
-   steering remains responsive.
-5. Turn the transmitter off and verify safe ESC outputs and centered steering,
-   then confirm STOP/OFF-to-RUN/ON is required after reconnection.
+4. With permanent latching enabled, verify both CH4 STOP/OFF positions command
+   safe ESC output while the armed state remains set, then return RUN with
+   throttle neutral and verify ramped recovery. Repeat receiver-loss testing.
+5. Disable permanent latching while `DISARMED`; verify STOP and receiver loss
+   fully disarm, and confirm a fresh healthy STOP-to-RUN cycle is required.
 6. Calibrate one ESC and motor first, then repeat for all four.
 7. Confirm wheel direction. Swap any two phase wires on an incorrect motor.
 8. Validate each RPM channel against an optical tachometer.
 9. Validate IMU yaw sign and stationary bias.
-10. Drive with torque vectoring disabled and verify equal output behavior.
-11. Enable straight assist at low authority and tune yaw response.
-12. Enable full assist only after straight behavior is stable.
+10. With traction power disconnected, associate Wi-Fi, stream the dashboard,
+    confirm CH1/CH2/CH4/CH5 and all sensor/output fields, and verify a guarded
+    configuration write is accepted only in `DISARMED`. Verify `Load saved
+    config`, the drivetrain cycle, and both arm-latch values. Confirm `arm`,
+    ordinary `disarm`, `monitor ...`, malformed calibration text, and arbitrary
+    commands are rejected over TCP. Exercise receiver/steering/CH4/CH5 capture
+    with a scope and confirm NVS changes only after the third validated step;
+    verify cancel and the 120-second timeout retain safe `DISARMED` output.
+    Check IMU retry with the car stationary. Test browser ESC endpoint/manual
+    actions only with the car lifted and restrained and traction power under
+    immediate physical control; verify neutral/CH4 guards, reverse-low output,
+    cancel, receiver-loss fallback, and the 30-second timeout.
+    From `DRIVE_ARMED`, confirm **Disarm for config** immediately commands safe
+    ESC outputs, reports `DISARMED`, and unlocks the forms. Confirm CH4 RUN alone
+    cannot rearm until the operator physically cycles STOP/OFF-to-RUN/ON.
+    Disconnect Wi-Fi for at least one minute, reconnect, export the CSV, and
+    confirm timestamps/sample sequencing span the outage without missing
+    intervals. Confirm clear is rejected after arming and accepted only in
+    `DISARMED`. Remove controller power during a sacrificial run to characterize
+    the documented final-buffer/corruption limit; do not use an important log.
+11. With the Dragy powered and traction power disconnected, verify GPIO4 sees
+    3.3 V UART data at the selected baud, the dashboard receives valid NMEA,
+    and the startup I2C list is stable without making the IMU stale. Check that
+    connecting GPIO5 does not change boot mode.
+12. Drive with torque vectoring disabled and verify equal output behavior.
+13. Enable straight assist at low authority and tune yaw response.
+14. Enable full assist only after straight behavior is stable.
 
 Keep the wheels clear of the ground for every calibration and first-power
 test. Four independent motors can produce substantial force even at low

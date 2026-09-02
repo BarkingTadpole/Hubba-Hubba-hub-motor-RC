@@ -149,6 +149,53 @@ static void test_full_mode_reduces_front_torque_at_lateral_limit(void)
           output.wheel_correction[WHEEL_REAR_RIGHT]);
 }
 
+static void test_fwd_uses_front_rpm_and_front_outputs_only(void)
+{
+    drive_config_t config = valid_config();
+    torque_vectoring_input_t input = valid_input();
+    torque_vectoring_state_t state;
+    torque_vectoring_output_t output;
+    torque_vectoring_reset(&state);
+    config.drivetrain_mode = DRIVETRAIN_FWD;
+    input.rpm.valid[WHEEL_REAR_LEFT] = false;
+    input.rpm.valid[WHEEL_REAR_RIGHT] = false;
+
+    torque_vectoring_update(&state, &config, &input, &output);
+
+    CHECK(output.active);
+    CHECK(output.wheel_correction[WHEEL_FRONT_LEFT] > 0.0f);
+    CHECK(output.wheel_correction[WHEEL_FRONT_RIGHT] ==
+          -output.wheel_correction[WHEEL_FRONT_LEFT]);
+    CHECK(output.wheel_correction[WHEEL_REAR_LEFT] == 0.0f);
+    CHECK(output.wheel_correction[WHEEL_REAR_RIGHT] == 0.0f);
+}
+
+static void test_rwd_uses_rear_rpm_and_does_not_apply_front_relief(void)
+{
+    drive_config_t config = valid_config();
+    torque_vectoring_input_t input = valid_input();
+    torque_vectoring_state_t state;
+    torque_vectoring_output_t output;
+    torque_vectoring_reset(&state);
+    config.drivetrain_mode = DRIVETRAIN_RWD;
+    config.tv_front_relief_percent = 20;
+    input.vehicle_speed_mps = 10.0f;
+    input.average_wheel_angle_deg = 5.0f;
+    input.rpm.valid[WHEEL_FRONT_LEFT] = false;
+    input.rpm.valid[WHEEL_FRONT_RIGHT] = false;
+
+    torque_vectoring_update(&state, &config, &input, &output);
+
+    CHECK(output.active);
+    CHECK(output.target_yaw_rate_dps == 45.0f);
+    CHECK(output.front_relief == 0.0f);
+    CHECK(output.wheel_correction[WHEEL_FRONT_LEFT] == 0.0f);
+    CHECK(output.wheel_correction[WHEEL_FRONT_RIGHT] == 0.0f);
+    CHECK(output.wheel_correction[WHEEL_REAR_LEFT] > 0.0f);
+    CHECK(output.wheel_correction[WHEEL_REAR_RIGHT] ==
+          -output.wheel_correction[WHEEL_REAR_LEFT]);
+}
+
 int main(void)
 {
     test_balanced_right_turn();
@@ -156,5 +203,7 @@ int main(void)
     test_non_finite_config_falls_back();
     test_integrator_does_not_wind_further_into_saturation();
     test_full_mode_reduces_front_torque_at_lateral_limit();
+    test_fwd_uses_front_rpm_and_front_outputs_only();
+    test_rwd_uses_rear_rpm_and_does_not_apply_front_relief();
     return 0;
 }
