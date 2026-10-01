@@ -78,4 +78,4 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 
 #docs
-docs/
+docs/**/*
