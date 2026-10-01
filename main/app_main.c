@@ -48,7 +48,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Serial CLI unavailable: %s", esp_err_to_name(err));
     }
-    err = telemetry_log_start();
+    err = telemetry_log_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Offline CSV telemetry logging unavailable: %s",
                  esp_err_to_name(err));

@@ -69,7 +69,7 @@ def telemetry(elapsed: float) -> dict:
                   "i2c_addresses": [0x6A, 0x42, 0x0D],
                   "compass_candidate_present": True,
                   "compass_data_supported": False},
-        "logging": {"initialized": True, "mounted": True, "recording": True,
+        "logging": {"initialized": True, "mounted": True, "manual_control": True, "recording": False,
                     "full": False, "faulted": False, "last_errno": 0,
                     "rate_hz": 5, "interval_ms": 200, "boot_id": 1234,
                     "samples": 2, "write_errors": 0, "bytes": len(MOCK_CSV),
@@ -95,6 +95,7 @@ def run(port: int) -> None:
     listener.bind(("127.0.0.1", port))
     listener.listen(1)
     print(f"Mock ESP32 listening on 127.0.0.1:{port}", flush=True)
+    recording = False
     while True:
         client, _ = listener.accept()
         with client:
@@ -121,9 +122,15 @@ def run(port: int) -> None:
                             chunk = MOCK_CSV[offset:offset + length]
                             client.sendall(f"B {log_parts[1]} {len(MOCK_CSV)} {offset} {len(chunk)}\n".encode() + chunk)
                         elif text.startswith("L ") and text.endswith(" CLEAR"):
+                            recording = False
                             log_parts = text.split()
                             client.sendall(f"R {log_parts[1]} OK mock CSV log cleared\n".encode())
-                message = "T " + json.dumps(telemetry(time.monotonic() - started), separators=(",", ":")) + "\n"
+                        elif text.startswith("L ") and text.split()[-1] in {"START", "STOP"}:
+                            recording = text.split()[-1] == "START"
+                            client.sendall(f"R {text.split()[1]} OK mock recording {'started' if recording else 'stopped'}\n".encode())
+                snapshot = telemetry(time.monotonic() - started)
+                snapshot["logging"]["recording"] = recording
+                message = "T " + json.dumps(snapshot, separators=(",", ":")) + "\n"
                 try:
                     client.sendall(message.encode())
                 except OSError:

@@ -1,6 +1,6 @@
 # Project Showcase Handoff
 
-Last updated: 2026-08-26
+Last updated: 2026-09-04
 
 This is the shared, concise source of truth for anyone building a project
 showcase, portfolio page, demo script, or public summary for the RC car. Keep
@@ -48,9 +48,17 @@ the driver's requested steering angle.
 - Explicit NVS configuration reload, one-click AWD/FWD/RWD cycling, and a
   persistent choice between boot-latched and STOP-to-disarm receiver behavior.
 - Offline, all-channel CSV recording in ESP32 flash, exportable after Wi-Fi
-  reconnects.
+  reconnects. Recording is manual: Start/Stop controls work independently of
+  drive state, Stop flushes buffered rows, and every boot/clear leaves it stopped.
+  Starting again appends to the same file. Host/mock/build validation only.
 - Browser-based post-run analysis for speed, RPM, receiver inputs, steering,
   yaw, ESC output, torque-vectoring correction, and acceleration.
+- Light phone-oriented dashboard with Live, Logs, Calibrate, and Settings
+  views, bottom navigation, persistent mobile connection/controller status,
+  touch chart inspection, grouped configuration, pinch/wheel/button graph zoom,
+  time panning, and full-run reset. All original telemetry,
+  configuration, calibration, and CSV features remain available. Chrome and
+  WebKit tests use simulated data; physical iPhone/ESP32 validation is pending.
 - USB serial calibration, monitoring, diagnostics, and persistent NVS
   configuration.
 
@@ -229,6 +237,9 @@ workspace.
 |---|---|---|
 | Generated ESP32 pin map | `C:\Users\aeara\rc_car\build\esp32_pin_map.svg` | Primary wiring visual; generated from the live pin configuration. |
 | Pin-map board background | `C:\Users\aeara\rc_car\tools\esp32_pin_map\esp32_board_minimal.png` | Source visual used by the generator; normally the SVG is the better showcase asset. |
+| Light monitor, iPhone viewport | `C:\Users\aeara\rc_car\docs\assets\monitor-ui\monitor-iphone.png` | 2026-09-04 WebKit capture at 390 CSS px; synthetic telemetry, not a vehicle measurement. |
+| Light monitor, desktop | `C:\Users\aeara\rc_car\docs\assets\monitor-ui\monitor-desktop.png` | 2026-09-04 WebKit capture at 1440 CSS px; synthetic telemetry. |
+| Touch data explorer | `C:\Users\aeara\rc_car\docs\assets\monitor-ui\monitor-logs-iphone.png` | 2026-09-04 WebKit capture of the Logs view; generated CSV fixture, not a recorded drive. |
 
 Regenerate the pin map from the repository root with:
 
@@ -240,7 +251,8 @@ or as part of a normal `idf.py build`. The generator writes only into
 `build/`; do not edit the SVG manually.
 
 There are currently no checked-in vehicle photos, drive videos, oscilloscope
-captures, dashboard screenshots, or analysis screenshots. Add every future
+captures, or measured-drive analysis screenshots. The dashboard previews above
+use synthetic data. Add every future
 showcase-worthy media file to this table with a short description, date, and
 whether it is measured hardware evidence or a simulation.
 

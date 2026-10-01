@@ -146,6 +146,12 @@ class EspLink:
         return result
 
     def clear_log(self, timeout: float = 5.0) -> dict[str, Any]:
+        return self._log_control("CLEAR", timeout)
+
+    def set_recording(self, recording: bool, timeout: float = 5.0) -> dict[str, Any]:
+        return self._log_control("START" if recording else "STOP", timeout)
+
+    def _log_control(self, action: str, timeout: float) -> dict[str, Any]:
         with self._lock:
             active = self._socket
             if active is None:
@@ -157,15 +163,15 @@ class EspLink:
             self._pending[request_id] = (completed, result)
         try:
             with self._send_lock:
-                active.sendall(f"L {request_id} CLEAR\n".encode("ascii"))
+                active.sendall(f"L {request_id} {action}\n".encode("ascii"))
         except OSError as exc:
             with self._lock:
                 self._pending.pop(request_id, None)
-            return {"ok": False, "message": f"clear request failed: {exc}"}
+            return {"ok": False, "message": f"log {action.lower()} request failed: {exc}"}
         if not completed.wait(timeout):
             with self._lock:
                 self._pending.pop(request_id, None)
-            return {"ok": False, "message": "ESP32 log clear timed out"}
+            return {"ok": False, "message": f"ESP32 log {action.lower()} timed out"}
         return result
 
     @staticmethod
@@ -475,6 +481,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path in {"/api/log/start", "/api/log/stop"}:
+            result = self.link.set_recording(self.path == "/api/log/start")
+            status = HTTPStatus.OK if result["ok"] else HTTPStatus.CONFLICT
+            self._json_response(status, result)
+            return
         if self.path == "/api/disarm":
             result = self.link.send_command("disarm config")
             status = HTTPStatus.OK if result["ok"] else HTTPStatus.CONFLICT

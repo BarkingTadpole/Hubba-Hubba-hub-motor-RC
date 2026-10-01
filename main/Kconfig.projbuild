@@ -47,13 +47,14 @@ endmenu
 menu "RC car offline telemetry log"
 
     config RC_TELEMETRY_LOG_ENABLED
-        bool "Record all telemetry channels to internal-flash CSV"
+        bool "Enable manually controlled internal-flash CSV recording"
         default y
         help
-            Append telemetry to a wear-levelled FAT partition independently
-            of Wi-Fi. Recording stops instead of overwriting old samples when
-            the partition is full. The browser bridge can export or explicitly
-            clear the CSV.
+            Mount storage at boot but wait for Start recording in the viewer.
+            Once started, append telemetry independently of Wi-Fi until Stop
+            recording, a reset, or a storage fault/full condition. Stop saves
+            buffered samples. The viewer can export or explicitly clear the CSV;
+            clearing leaves recording stopped.
 
 endmenu
 

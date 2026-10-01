@@ -6,6 +6,27 @@ creates SSID `RC-Car-ESP32` and serves the embedded viewer directly at
 development default: `rc-car-viewer`). The files in `web/` remain the source
 assets embedded into each firmware build.
 
+The viewer uses a light layout with **Live**, **Logs**, **Calibrate**, and
+**Settings** navigation. Phones have a fixed bottom navigation bar and a
+persistent connection/controller header. Changing views preserves edits and
+loaded analysis data; calibration continues under the same firmware guards.
+Tap a chart for sample values. Logs supports pinch/wheel/button zoom and drag
+panning. **Earlier** / **Later** move a zoomed time window; **Reset zoom**
+restores the full run. Zoom remains
+when switching groups and resets for each newly loaded CSV. Scroll the page
+outside the chart. All eight signal groups remain available in
+Logs, along with local CSV import, device export/loading, and guarded clear.
+The application uses only its embedded HTML/CSS/JS and works without internet.
+Rebuild and flash the firmware to update the ESP32-hosted UI; changes in this
+directory alone affect only the development server.
+
+Recording is manual: **Logs > Start recording** appends to the current CSV;
+**Stop recording** saves buffered samples and stops capture. Every boot and
+every clear/recovery leaves it stopped. Start/Stop work in any drive state
+without changing motor outputs. Once started, Wi-Fi loss does not stop it.
+The development bridge maps these dedicated HTTP routes to `L <id> START`
+and `L <id> STOP`; the current ESP32 firmware serves HTTP directly.
+
 The bridge below is retained only for frontend/mock development and tests.
 
 The ESP32 connects to the configured 2.4 GHz WLAN and exposes a small TCP

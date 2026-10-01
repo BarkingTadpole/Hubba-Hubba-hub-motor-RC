@@ -794,6 +794,18 @@ without either removing the logger cleanly or providing another persistent
 storage design.
 
 `telemetry_log.c` owns `/telemetry/telemetry.csv` and a priority-1 CPU0 task.
+As of 2026-09-04, recording is explicitly manual and stopped on every boot.
+`telemetry_log_init()` mounts/opens storage and starts an idle worker; only
+`telemetry_log_set_recording(true)` starts sampling. Viewer Start/Stop actions
+use dedicated `/api/log/start` and `/api/log/stop` POST routes and are allowed
+while armed without changing drive state. Stop disables writes under the
+logger mutex and flushes/fsyncs before acknowledging success; failures remain
+stopped and faulted. A generation counter discards in-flight rows across
+stop/start/clear. Start appends to the existing CSV. Clear/recovery always
+leaves recording stopped. Never resume automatically on boot, reconnect,
+arming, or a sample-rate change; recording state is not persisted in NVS.
+This has host lifecycle, mock browser/API, and build validation only; actual
+flash flush durability and on-car behavior remain bench pending.
 The default rate is 1 Hz (1000 ms). The `cfg/log_hz` NVS key accepts `1-50 Hz`;
 `config logging rate <hz>` and the live viewer configuration control update it
 only while `DISARMED`, and the change takes effect without rebooting. It samples the public mutex-protected
@@ -971,7 +983,8 @@ These are requirements, not suggestions:
   steering output, `monitor ...`, or arbitrary terminal paths. Calibration may
   change output only through the existing guarded ESC endpoint/manual states.
 - Offline logging must remain independent of Wi-Fi and outside the powertrain
-  loop. Full storage stops recording rather than overwriting existing rows;
+  loop after an explicit Start. Boot and clear must leave recording stopped.
+  Full storage stops recording rather than overwriting existing rows;
   browser clear remains a deliberate `DISARMED`-only operation.
 - Invalid drivetrain selection commands are rejected, invalid stored values
   fall back to AWD, and invalid runtime values safe all four ESC outputs.

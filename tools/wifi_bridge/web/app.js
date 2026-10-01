@@ -25,6 +25,33 @@ let initialInputsLoaded = false;
 let analysisData = null;
 let plottedSeries = [];
 let calibrationRequestPending = false;
+let recordingRequestPending = false;
+
+// Switching views never reloads telemetry, form drafts, or an active workflow.
+const viewScroll = {};
+let activeView = null;
+function showView() {
+  const aliases = {analysis: "logs", calibration: "calibrate"};
+  const requested = location.hash.slice(1);
+  if (requested === "main" && activeView) {
+    el("main").focus();
+    return;
+  }
+  const view = aliases[requested] || requested || "live";
+  const selected = ["live", "logs", "calibrate", "settings"].includes(view) ? view : "live";
+  if (activeView === selected) return;
+  if (activeView) viewScroll[activeView] = window.scrollY;
+  document.querySelectorAll("[data-page]").forEach(page => { page.hidden = page.dataset.page !== selected; });
+  document.querySelectorAll("[data-view]").forEach(link => {
+    if (link.dataset.view === selected) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  activeView = selected;
+  el("main").focus({preventScroll: true});
+  window.scrollTo(0, viewScroll[selected] || 0);
+  if (selected === "logs") drawChart();
+}
+window.addEventListener("hashchange", showView);
 
 function renderChannels(rc = {}) {
   el("receiver-grid").innerHTML = channels.map(([key, label]) => {
@@ -126,6 +153,10 @@ function renderLinkHealth(state) {
 }
 
 function renderLogging(logging, stateName, fresh) {
+  const manualControl = fresh && logging?.manual_control === true && logging?.mounted === true;
+  el("start-recording").disabled = !(manualControl && !recordingRequestPending &&
+    !logging.recording && !logging.full && !logging.faulted);
+  el("stop-recording").disabled = !(manualControl && !recordingRequestPending && logging.recording);
   if (!logging) {
     setText("log-state", "Not reported by installed firmware");
     setText("retention-estimate", "Flash logger requires the updated firmware");
@@ -141,7 +172,8 @@ function renderLogging(logging, stateName, fresh) {
     ? "STORAGE ALLOCATION FULL — recovery required"
     : logging.faulted
     ? `STORAGE FAULT${logging.last_errno ? ` (errno ${logging.last_errno})` : ""} — export readable data, then clear`
-    : (logging.full ? "FULL — export and clear" : (logging.recording ? "Recording offline and online" : "Unavailable"));
+    : (logging.full ? "FULL — export and clear" : (logging.recording ? "Recording — continues without Wi-Fi" :
+      (logging.mounted ? "Stopped — select Start recording when ready" : "Storage unavailable")));
   setText("log-state", logState);
   setText("log-samples", Number(logging.samples || 0).toLocaleString());
   setText("log-size", `${bytesLabel(logging.bytes)} / ${bytesLabel(logging.capacity_bytes)}`);
@@ -167,6 +199,14 @@ function renderLogging(logging, stateName, fresh) {
 
 function render(state) {
   renderLinkHealth(state);
+  const snapshotFresh = Boolean((state.telemetry_fresh || state.connected) &&
+    Number(state.telemetry_age_ms) < 1500 && state.telemetry);
+  document.body.dataset.stale = String(!snapshotFresh);
+  el("freshness-notice").hidden = snapshotFresh;
+  setText("freshness-notice", "Live telemetry unavailable. Displayed readings may be old. Check the car's Wi-Fi connection; controls unlock when fresh data returns.");
+  setText("global-state", snapshotFresh ? (state.telemetry.inhibited ? "Output inhibited" : String(state.telemetry.state || "Unknown state").replaceAll("_", " ")) : "Status unavailable");
+  el("global-state").classList.toggle("armed", snapshotFresh && Boolean(state.telemetry.armed || state.telemetry.inhibited));
+  el("cal-nav-indicator").hidden = !(snapshotFresh && state.telemetry.calibration?.active);
   if (!state.transport_connected) initialInputsLoaded = false;
   const t = state.telemetry;
   if (!t) {
@@ -174,6 +214,13 @@ function render(state) {
     document.querySelectorAll("form button").forEach(button => button.disabled = true);
     document.querySelectorAll("[data-cal-command]").forEach(button => button.disabled = true);
     el("disarm-for-config").disabled = true;
+    el("download-log").classList.add("disabled");
+    el("load-device-log").disabled = true;
+    el("clear-log").disabled = true;
+    el("start-recording").disabled = true;
+    el("stop-recording").disabled = true;
+    setText("config-lock", "Configuration locked: waiting for fresh telemetry");
+    el("config-lock").className = "warning";
     return;
   }
   const steering = t.steering || {}, imu = t.imu || {}, tv = t.tv || {}, dragy = t.dragy || {};
@@ -406,6 +453,28 @@ el("clear-log").addEventListener("click", async () => {
     message.textContent = `Clear failed: ${error}`;
   }
 });
+async function setRecording(recording) {
+  if (recordingRequestPending) return;
+  recordingRequestPending = true;
+  el("start-recording").disabled = true;
+  el("stop-recording").disabled = true;
+  const message = el("log-message");
+  message.className = "message";
+  message.textContent = recording ? "Starting recording…" : "Stopping and saving recorded samples…";
+  try {
+    const response = await fetch(recording ? "/api/log/start" : "/api/log/stop", {method: "POST"});
+    const result = await response.json();
+    message.className = `message ${response.ok && result.ok ? "success" : "error"}`;
+    message.textContent = result.message;
+  } catch (error) {
+    message.className = "message error";
+    message.textContent = `Recording request failed; check the device recording status before retrying: ${error}`;
+  } finally {
+    recordingRequestPending = false;
+  }
+}
+el("start-recording").addEventListener("click", () => setRecording(true));
+el("stop-recording").addEventListener("click", () => setRecording(false));
 el("download-log").addEventListener("click", event => {
   if (el("download-log").classList.contains("disabled")) event.preventDefault();
 });
@@ -420,7 +489,7 @@ const analysisGroups = {
   vectoring: {unit: "fraction", series: [["tv_corr_fl", "FL correction"], ["tv_corr_fr", "FR correction"], ["tv_corr_rl", "RL correction"], ["tv_corr_rr", "RR correction"], ["tv_front_relief", "Front relief"]]},
   accel: {unit: "m/s²", series: [["imu_ax_mps2", "IMU X"], ["imu_ay_mps2", "IMU Y"], ["imu_az_mps2", "IMU Z"], ["tv_predicted_lateral_mps2", "Predicted lateral"]]}
 };
-const chartColors = ["#70f0c0", "#ffb454", "#65b8ff", "#f279c6", "#c6f16d", "#ad8cff"];
+const chartColors = ["#087759", "#ad620c", "#2775be", "#b64488", "#6b7e19", "#7b57ba"];
 
 function parseCsv(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim() !== "");
@@ -462,32 +531,96 @@ function summarizeAnalysis() {
   setText("analysis-rpm", Number.isFinite(peakRpm) ? `${peakRpm.toFixed(0)} RPM` : "--");
 }
 
+let chartWindow = null;
+const chartPointers = new Map();
+let chartGesture = null;
+const chartDuration = () => Math.max(analysisData?.rows.at(-1)?.__time || 0, 0.001);
+const chartMinimumSpan = () => Math.min(chartDuration(), Math.max(0.001, chartDuration() / 1000));
+const chartBounds = () => chartWindow || {start: 0, end: chartDuration()};
+function chartFraction(clientX) {
+  const rect = el("analysis-chart").getBoundingClientRect();
+  return Math.min(1, Math.max(0, (clientX - rect.left - 70) / Math.max(1, rect.width - 88)));
+}
+function setChartWindow(start, span) {
+  if (!analysisData) return;
+  const duration = chartDuration();
+  span = Math.min(duration, Math.max(chartMinimumSpan(), span));
+  start = Math.max(0, Math.min(duration - span, start));
+  chartWindow = span >= duration ? null : {start, end: start + span};
+  drawChart();
+}
+function zoomChart(factor, fraction = 0.5) {
+  const {start, end} = chartBounds();
+  const span = Math.min(chartDuration(), Math.max(chartMinimumSpan(), (end - start) * factor));
+  setChartWindow(start + (end - start) * fraction - span * fraction, span);
+}
+function panChart(direction) {
+  const {start, end} = chartBounds();
+  setChartWindow(start + direction * (end - start) / 2, end - start);
+}
+function updateChartControls() {
+  const {start, end} = chartBounds(), duration = chartDuration();
+  const enabled = Boolean(analysisData && analysisData.rows.length > 1 && analysisData.rows.at(-1).__time > 0);
+  el("chart-zoom-in").disabled = !enabled || end - start <= chartMinimumSpan() * 1.00001;
+  el("chart-zoom-out").disabled = !enabled || !chartWindow;
+  el("chart-reset").disabled = !enabled || !chartWindow;
+  el("chart-pan-left").disabled = !enabled || start <= 0;
+  el("chart-pan-right").disabled = !enabled || end >= duration;
+  setText("chart-range", chartWindow ? `${start.toFixed(3)}–${end.toFixed(3)} s · ${(duration / (end - start)).toFixed(1)}×` : "Full run");
+}
+el("chart-zoom-in").addEventListener("click", () => zoomChart(0.5));
+el("chart-zoom-out").addEventListener("click", () => zoomChart(2));
+el("chart-pan-left").addEventListener("click", () => panChart(-1));
+el("chart-pan-right").addEventListener("click", () => panChart(1));
+el("chart-reset").addEventListener("click", () => { chartWindow = null; drawChart(); });
+
 function drawChart() {
+  updateChartControls();
   const canvas = el("analysis-chart"), context = canvas.getContext("2d");
-  const ratio = window.devicePixelRatio || 1, width = canvas.clientWidth || 1280, height = 460;
+  if (!canvas.clientWidth) return;
+  el("chart-tooltip").hidden = true;
+  el("chart-legend").textContent = "";
+  plottedSeries = [];
+  const ratio = window.devicePixelRatio || 1, width = canvas.clientWidth, height = canvas.clientHeight;
   canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
-  context.fillStyle = "#09171c"; context.fillRect(0, 0, width, height);
-  if (!analysisData) return;
+  context.fillStyle = "#ffffff"; context.fillRect(0, 0, width, height);
+  if (!analysisData) {
+    context.fillStyle = "#60736e";
+    context.font = "14px -apple-system, sans-serif";
+    context.textAlign = "center";
+    context.fillText("Your next run starts here", width / 2, height / 2 - 8);
+    context.font = "12px -apple-system, sans-serif";
+    context.fillText("Open a CSV to explore your data", width / 2, height / 2 + 16);
+    return;
+  }
   const group = analysisGroups[el("analysis-group").value];
   plottedSeries = group.series.map(([key, label], index) => ({key, label, color: chartColors[index]}))
     .filter(series => analysisData.headers.includes(series.key));
-  const points = analysisData.rows;
-  const values = points.flatMap(row => plottedSeries.map(series => numeric(row, series.key))).filter(Number.isFinite);
-  if (!values.length) {
+  const allPoints = analysisData.rows;
+  const {start: startTime, end: endTime} = chartBounds();
+  // Retain one sample on either side so lines crossing the viewport stay continuous.
+  const first = Math.max(0, allPoints.findIndex(row => row.__time >= startTime) - 1);
+  const after = allPoints.findIndex(row => row.__time > endTime);
+  const points = allPoints.slice(first, after < 0 ? allPoints.length : after + 1);
+  let minimum = Infinity, maximum = -Infinity;
+  for (const row of points) for (const series of plottedSeries) {
+    const value = numeric(row, series.key);
+    if (value !== null) { minimum = Math.min(minimum, value); maximum = Math.max(maximum, value); }
+  }
+  if (!Number.isFinite(minimum)) {
     el("analysis-message").className = "message error";
     setText("analysis-message", `No ${group.unit} columns are present in this CSV.`);
     return;
   }
-  let minimum = Math.min(...values), maximum = Math.max(...values);
   if (minimum === maximum) { minimum -= 1; maximum += 1; }
   const pad = (maximum - minimum) * 0.08; minimum -= pad; maximum += pad;
   const left = 70, right = 18, top = 24, bottom = 48;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
-  const endTime = Math.max(points.at(-1).__time, 0.001);
-  const x = time => left + time / endTime * plotWidth;
+  const timeSpan = endTime - startTime;
+  const x = time => left + (time - startTime) / timeSpan * plotWidth;
   const y = value => top + (maximum - value) / (maximum - minimum) * plotHeight;
-  context.strokeStyle = "#24404b"; context.fillStyle = "#87a2ab";
+  context.strokeStyle = "#e3ebe6"; context.fillStyle = "#60736e";
   context.lineWidth = 1; context.font = "12px ui-monospace, monospace";
   for (let tick = 0; tick <= 5; tick++) {
     const py = top + tick / 5 * plotHeight, value = maximum - tick / 5 * (maximum - minimum);
@@ -495,13 +628,18 @@ function drawChart() {
     context.fillText(value.toFixed(2), 8, py + 4);
     const px = left + tick / 5 * plotWidth;
     context.beginPath(); context.moveTo(px, top); context.lineTo(px, height - bottom); context.stroke();
-    context.fillText(`${(endTime * tick / 5).toFixed(1)} s`, px - 15, height - 18);
+    const decimals = timeSpan < 0.1 ? 3 : timeSpan < 1 ? 2 : 1;
+    const label = `${(startTime + timeSpan * tick / 5).toFixed(decimals)} s`;
+    context.fillText(label, Math.min(width - context.measureText(label).width - 4, px - 15), height - 18);
   }
   const stride = Math.max(1, Math.ceil(points.length / Math.max(800, width)));
+  context.save();
+  context.beginPath(); context.rect(left, top, plotWidth, plotHeight); context.clip();
   plottedSeries.forEach(series => {
     context.strokeStyle = series.color; context.lineWidth = 2; context.beginPath();
     let started = false;
-    for (let index = 0; index < points.length; index += stride) {
+    for (let step = 0; step <= Math.ceil((points.length - 1) / stride); step++) {
+      const index = Math.min(step * stride, points.length - 1);
       const value = numeric(points[index], series.key);
       if (value === null) { started = false; continue; }
       const px = x(points[index].__time), py = y(value);
@@ -509,12 +647,18 @@ function drawChart() {
     }
     context.stroke();
   });
+  context.restore();
   el("chart-legend").innerHTML = plottedSeries.map(series => `<span><i style="background:${series.color}"></i>${series.label}</span>`).join("");
   el("analysis-message").className = "message success";
-  setText("analysis-message", `${plottedSeries.length} project channels plotted in ${group.unit}. Hover for exact sample values.`);
+  setText("analysis-message", `${plottedSeries.length} project channels plotted in ${group.unit}. Tap or hover for exact sample values.`);
 }
 
 function loadAnalysis(text, source) {
+  chartWindow = null;
+  chartPointers.clear();
+  chartGesture = null;
+  el("analysis-chart").classList.remove("dragging");
+  inspectedSample = 0;
   try {
     analysisData = parseCsv(text);
     if (!analysisData.rows.length) {
@@ -565,27 +709,108 @@ el("load-device-log").addEventListener("click", async () => {
 });
 el("analysis-group").addEventListener("change", drawChart);
 window.addEventListener("resize", () => analysisData && drawChart());
-el("analysis-chart").addEventListener("mousemove", event => {
+let inspectedSample = 0;
+function inspectChart(event) {
   if (!analysisData || !plottedSeries.length) return;
   const rect = event.target.getBoundingClientRect();
-  const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left - 70) / Math.max(1, rect.width - 88)));
-  const target = fraction * analysisData.rows.at(-1).__time;
+  const fraction = chartFraction(event.clientX);
+  const {start, end} = chartBounds();
+  const target = start + fraction * (end - start);
   let low = 0, high = analysisData.rows.length - 1;
   while (low < high) {
     const mid = Math.floor((low + high) / 2);
     if (analysisData.rows[mid].__time < target) low = mid + 1; else high = mid;
   }
+  if (low > 0 && target - analysisData.rows[low - 1].__time < analysisData.rows[low].__time - target) low--;
+  inspectedSample = low;
   const row = analysisData.rows[low], tooltip = el("chart-tooltip");
   tooltip.innerHTML = `<strong>${row.__time.toFixed(2)} s</strong>${plottedSeries.map(series => `<span><i style="background:${series.color}"></i>${series.label}: ${fmt(numeric(row, series.key), 3)}</span>`).join("")}`;
   tooltip.hidden = false;
-  tooltip.style.left = `${Math.min(rect.width - 230, Math.max(8, event.clientX - rect.left + 12))}px`;
-  tooltip.style.top = `${Math.max(8, event.clientY - rect.top - 30)}px`;
+  tooltip.style.left = `${Math.max(8, Math.min(rect.width - tooltip.offsetWidth - 8, event.clientX - rect.left + 12))}px`;
+  tooltip.style.top = `${Math.max(8, Math.min(rect.height - tooltip.offsetHeight - 8, event.clientY - rect.top - 30))}px`;
+}
+function beginChartGesture() {
+  const pointers = [...chartPointers.values()];
+  const {start, end} = chartBounds();
+  if (!pointers.length) { chartGesture = null; return; }
+  const midpoint = pointers.reduce((sum, point) => sum + point.x, 0) / pointers.length;
+  chartGesture = {start, span: end - start, midpoint,
+    anchor: start + chartFraction(midpoint) * (end - start),
+    distance: pointers.length === 2 ? Math.hypot(pointers[0].x - pointers[1].x, pointers[0].y - pointers[1].y) : 0};
+}
+el("analysis-chart").addEventListener("pointerdown", event => {
+  if (!analysisData || event.button !== 0 || chartPointers.size >= 2) return;
+  chartPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+  event.target.setPointerCapture(event.pointerId);
+  beginChartGesture();
+  if (chartPointers.size === 1) inspectChart(event);
+  else el("chart-tooltip").hidden = true;
 });
-el("analysis-chart").addEventListener("mouseleave", () => { el("chart-tooltip").hidden = true; });
+el("analysis-chart").addEventListener("pointermove", event => {
+  if (!chartPointers.has(event.pointerId)) {
+    if (event.pointerType === "mouse") inspectChart(event);
+    return;
+  }
+  chartPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+  const pointers = [...chartPointers.values()];
+  if (!chartGesture) return;
+  const midpoint = pointers.reduce((sum, point) => sum + point.x, 0) / pointers.length;
+  const width = Math.max(1, event.target.clientWidth - 88);
+  if (pointers.length === 2 && chartGesture.distance > 0) {
+    const distance = Math.max(1, Math.hypot(pointers[0].x - pointers[1].x, pointers[0].y - pointers[1].y));
+    const span = Math.min(chartDuration(), Math.max(chartMinimumSpan(), chartGesture.span * chartGesture.distance / distance));
+    setChartWindow(chartGesture.anchor - chartFraction(midpoint) * span, span);
+  } else if (Math.abs(midpoint - chartGesture.midpoint) > 3) {
+    setChartWindow(chartGesture.start - (midpoint - chartGesture.midpoint) / width * chartGesture.span, chartGesture.span);
+  } else return;
+  event.target.classList.add("dragging");
+});
+function endChartPointer(event) {
+  if (!chartPointers.delete(event.pointerId)) return;
+  beginChartGesture();
+  if (!chartPointers.size) el("analysis-chart").classList.remove("dragging");
+}
+el("analysis-chart").addEventListener("pointerup", endChartPointer);
+el("analysis-chart").addEventListener("lostpointercapture", endChartPointer);
+el("analysis-chart").addEventListener("wheel", event => {
+  if (!analysisData) return;
+  event.preventDefault();
+  const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? event.target.clientHeight : 1);
+  zoomChart(Math.exp(Math.max(-1, Math.min(1, pixels * 0.002))), chartFraction(event.clientX));
+}, {passive: false});
+el("analysis-chart").addEventListener("pointerleave", event => {
+  if (event.pointerType === "mouse") el("chart-tooltip").hidden = true;
+});
+el("analysis-chart").addEventListener("pointercancel", event => { endChartPointer(event); el("chart-tooltip").hidden = true; });
+el("analysis-chart").addEventListener("blur", () => { el("chart-tooltip").hidden = true; });
+el("analysis-chart").addEventListener("keydown", event => {
+  if (event.key === "Escape") { el("chart-tooltip").hidden = true; return; }
+  if (analysisData && ["+", "=", "-", "0"].includes(event.key)) {
+    event.preventDefault();
+    if (event.key === "0") { chartWindow = null; drawChart(); }
+    else zoomChart(event.key === "-" ? 2 : 0.5);
+    return;
+  }
+  if (!analysisData || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  event.preventDefault();
+  if (event.shiftKey) { panChart(event.key === "ArrowRight" ? 1 : -1); return; }
+  inspectedSample = Math.max(0, Math.min(analysisData.rows.length - 1, inspectedSample + (event.key === "ArrowRight" ? 1 : -1)));
+  const rect = event.target.getBoundingClientRect();
+  const time = analysisData.rows[inspectedSample].__time;
+  let {start, end} = chartBounds();
+  if (time < start || time > end) {
+    setChartWindow(time - (end - start) / 2, end - start);
+    ({start, end} = chartBounds());
+  }
+  const fraction = (time - start) / (end - start);
+  inspectChart({target: event.target, clientX: rect.left + 70 + fraction * (rect.width - 88), clientY: rect.top + 24});
+});
 
 async function poll() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const response = await fetch("/api/state", {cache: "no-store"});
+    const response = await fetch("/api/state", {cache: "no-store", signal: controller.signal});
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
     if (payload && payload.protocol === 1 && !payload.telemetry) {
@@ -605,6 +830,7 @@ async function poll() {
   } catch (error) {
     render({connected: false, transport_connected: false, last_error: `ESP32 viewer unavailable: ${error}`, telemetry: null});
   } finally {
+    clearTimeout(timeout);
     setTimeout(poll, 250);
   }
 }
@@ -615,4 +841,6 @@ window.addEventListener("error", event => {
     message.textContent = `Dashboard JavaScript error: ${event.message}`;
   }
 });
+showView();
+render({connected: false, transport_connected: false, telemetry: null});
 poll();

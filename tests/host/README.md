@@ -77,3 +77,50 @@ command rejection. These tests do not
 exercise ESP32 flash/FAT peripherals, FreeRTOS
 scheduling, receiver safety behavior, Wi-Fi or GPS hardware, power-loss
 recovery, physical calibration workflows, or the car.
+
+## Monitor browser regression checks
+
+`test_monitor_ui.cjs` runs the actual dashboard against a synthetic local HTTP
+device in Chrome and Playwright WebKit. It checks layouts at 320, 375, 390,
+430, 844, and 1440 px, 44 px touch targets, all 17 configuration forms,
+calibration commands/captures/cancel, maintenance disarm, CSV export/import,
+eight chart groups, touch/keyboard inspection, and connection-loss recovery.
+Graph coverage includes button/wheel/keyboard zoom, drag/button/keyboard pan,
+window bounds, sample inspection while zoomed, state preservation across views
+and groups, reset on CSV load, and native Chromium multi-touch pinch input.
+The mock accepts commands for UI verification; firmware guards are covered
+separately by the existing host tests. These are not physical iPhone tests.
+
+Install browser-test dependencies outside the repository, for example:
+
+```powershell
+npm install --prefix "$env:TEMP/rc-monitor-ui" playwright
+& "$env:TEMP/rc-monitor-ui/node_modules/.bin/playwright.cmd" install webkit
+$env:NODE_PATH = "$env:TEMP/rc-monitor-ui/node_modules"
+node tests/host/test_monitor_ui.cjs
+```
+
+Chrome must also be installed. `PYTHON` can select the Python executable used
+to read the existing mock telemetry fixture. Set `MONITOR_SCREENSHOTS` to an
+output directory to save browser previews with simulated data.
+
+## Logger lifecycle host checks
+
+`python tests/host/test_telemetry_log.py` compiles the production logger's
+file lifecycle and worker with host filesystem I/O and deterministic RTOS
+stubs. It covers idle boot/reboot with existing data, explicit start/stop,
+append/export, flush failure, clear/recovery, storage guards, and in-flight
+row rejection across stop/start/clear. CSV sensor formatting is stubbed.
+This does not test ESP32 FAT, physical flash durability, or real scheduling.
+
+Use a native C compiler via `CC`, or set `ZIG` to a Zig executable (the runner
+uses `zig cc`). For example, keep the dependency outside the repository:
+
+```powershell
+python -m pip install --target "$env:TEMP/rc-monitor-logger" ziglang
+$env:ZIG = "$env:TEMP/rc-monitor-logger/ziglang/zig.exe"
+python tests/host/test_telemetry_log.py
+```
+
+Browser tests also exercise manual recording controls in disarmed/armed
+states and ensure they lock on unavailable, full, faulted, or older firmware.

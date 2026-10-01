@@ -23,7 +23,11 @@ typedef struct {
     uint64_t free_bytes;
 } telemetry_log_status_t;
 
-esp_err_t telemetry_log_start(void);
+/* Mount storage and start the idle worker. Recording is always stopped at boot. */
+esp_err_t telemetry_log_init(void);
+/* Append to the existing CSV; stop flushes/fsyncs before returning success.
+ * These operations do not change powertrain state and are allowed while armed. */
+esp_err_t telemetry_log_set_recording(bool recording);
 void telemetry_log_get_status(telemetry_log_status_t *status);
 
 /* Read a stable byte range from the CSV. The current size is returned so the

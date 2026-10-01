@@ -223,7 +223,7 @@ static int format_telemetry(char *buffer, size_t buffer_size)
           "\"i2c_addresses\":[%s],\"compass_candidate_present\":%s,"
           "\"compass_data_supported\":false},"
         "\"logging\":{\"initialized\":%s,\"mounted\":%s,"
-          "\"recording\":%s,\"full\":%s,\"faulted\":%s,\"last_errno\":%d,"
+          "\"manual_control\":true,\"recording\":%s,\"full\":%s,\"faulted\":%s,\"last_errno\":%d,"
           "\"rate_hz\":%lu,\"interval_ms\":%lu,"
           "\"boot_id\":%lu,\"samples\":%lu,\"write_errors\":%lu,"
           "\"bytes\":%llu,\"capacity_bytes\":%llu,\"free_bytes\":%llu},"
@@ -741,8 +741,21 @@ static esp_err_t log_clear_post_handler(httpd_req_t *request)
     esp_err_t err = disarmed ? telemetry_log_clear() : ESP_ERR_INVALID_STATE;
     return send_json_message(
         request, err == ESP_OK ? "200 OK" : "409 Conflict", err == ESP_OK,
-        err == ESP_OK ? "CSV log cleared and storage is recording"
-                      : "log clear requires the car to be DISARMED");
+        err == ESP_OK ? "CSV log cleared. Recording is stopped; use Start recording when ready."
+                      : (disarmed ? "Log storage could not be cleared; check storage status."
+                                  : "log clear requires the car to be DISARMED"));
+}
+
+static esp_err_t log_recording_post_handler(httpd_req_t *request)
+{
+    bool recording = strcmp(request->uri, "/api/log/start") == 0;
+    esp_err_t err = telemetry_log_set_recording(recording);
+    return send_json_message(
+        request, err == ESP_OK ? "200 OK" : "409 Conflict", err == ESP_OK,
+        err == ESP_OK ? (recording ? "Recording started; appending to the device CSV."
+                                  : "Recording stopped. Recorded samples are saved.")
+                      : (recording ? "Cannot start recording: storage is unavailable, full, or faulted. Export before clearing."
+                                   : "Recording could not be confirmed saved; check storage status and export readable data."));
 }
 
 static esp_err_t register_http_handlers(httpd_handle_t server)
@@ -760,6 +773,8 @@ static esp_err_t register_http_handlers(httpd_handle_t server)
         {.uri = "/api/disarm", .method = HTTP_POST, .handler = disarm_post_handler},
         {.uri = "/api/log.csv", .method = HTTP_GET, .handler = log_get_handler},
         {.uri = "/api/log/clear", .method = HTTP_POST, .handler = log_clear_post_handler},
+        {.uri = "/api/log/start", .method = HTTP_POST, .handler = log_recording_post_handler},
+        {.uri = "/api/log/stop", .method = HTTP_POST, .handler = log_recording_post_handler},
     };
     for (size_t index = 0; index < sizeof(handlers) / sizeof(handlers[0]); index++) {
         esp_err_t err = httpd_register_uri_handler(server, &handlers[index]);

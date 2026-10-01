@@ -71,6 +71,8 @@ static wl_handle_t wl_handle = WL_INVALID_HANDLE;
 static TaskHandle_t log_task_handle;
 static char log_stdio_buffer[LOG_STDIO_BUFFER_SIZE];
 static telemetry_log_status_t log_status;
+/* Invalidates a row formatted outside the mutex across stop/start or clear. */
+static uint32_t recording_generation;
 
 static const char *state_name(system_state_t state)
 {
@@ -284,7 +286,7 @@ static esp_err_t open_log_file_locked(void)
     }
     log_status.faulted = false;
     log_status.last_errno = 0;
-    log_status.recording = true;
+    log_status.recording = false;
     return ESP_OK;
 }
 
@@ -349,8 +351,13 @@ static void log_task(void *arg)
         }
 
         xSemaphoreTake(log_mutex, portMAX_DELAY);
+        if (!log_status.recording) {
+            xSemaphoreGive(log_mutex);
+            continue;
+        }
         uint32_t boot_id = log_status.boot_id;
         uint32_t sample_sequence = log_status.sample_count + 1;
+        uint32_t generation = recording_generation;
         xSemaphoreGive(log_mutex);
         if (!format_row(row, sizeof(row), boot_id, sample_sequence)) {
             xSemaphoreTake(log_mutex, portMAX_DELAY);
@@ -360,7 +367,8 @@ static void log_task(void *arg)
         }
         size_t row_size = strlen(row);
         xSemaphoreTake(log_mutex, portMAX_DELAY);
-        if (sample_sequence != log_status.sample_count + 1) {
+        if (!log_status.recording || generation != recording_generation ||
+            sample_sequence != log_status.sample_count + 1) {
             xSemaphoreGive(log_mutex);
             continue;
         }
@@ -378,7 +386,7 @@ static void log_task(void *arg)
                     log_status.last_errno = flush_errno != 0 ? flush_errno : EIO;
                     clearerr(log_file);
                 }
-                ESP_LOGW(TAG, "CSV log is full; export and clear it to resume recording");
+                ESP_LOGW(TAG, "CSV log is full; export, clear, then select Start recording");
             } else if (fwrite(row, 1, row_size, log_file) == row_size) {
                 log_status.sample_count = sample_sequence;
                 log_status.file_bytes += row_size;
@@ -412,7 +420,7 @@ static void log_task(void *arg)
     }
 }
 
-esp_err_t telemetry_log_start(void)
+esp_err_t telemetry_log_init(void)
 {
     if (log_mutex != NULL) return ESP_ERR_INVALID_STATE;
     log_mutex = xSemaphoreCreateMutex();
@@ -437,8 +445,11 @@ esp_err_t telemetry_log_start(void)
                              log_status.rate_hz;
     log_status.boot_id = esp_random();
     refresh_space_locked();
+    log_status.full = log_status.capacity_bytes > 0 &&
+                      log_status.free_bytes <= LOG_FREE_RESERVE_BYTES;
     err = open_log_file_locked();
     if (err != ESP_OK) {
+        mark_storage_fault_locked("open", errno);
         ESP_LOGE(TAG, "Could not open CSV log file");
         return err;
     }
@@ -453,10 +464,45 @@ esp_err_t telemetry_log_start(void)
         log_status.recording = false;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "Offline CSV recording at %u Hz (%u ms); %llu usable bytes",
+    ESP_LOGI(TAG, "CSV ready, recording STOPPED; %u Hz (%u ms); %llu usable bytes",
              log_status.rate_hz, log_status.interval_ms,
              (unsigned long long)log_status.capacity_bytes);
     return ESP_OK;
+}
+
+esp_err_t telemetry_log_set_recording(bool recording)
+{
+    if (log_mutex == NULL) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(log_mutex, portMAX_DELAY);
+    esp_err_t result = ESP_OK;
+    if (!log_status.mounted || log_file == NULL || log_task_handle == NULL) {
+        result = ESP_ERR_INVALID_STATE;
+    } else if (recording) {
+        refresh_space_locked();
+        if (log_status.capacity_bytes > 0 &&
+            log_status.free_bytes <= LOG_FREE_RESERVE_BYTES) log_status.full = true;
+        if (log_status.full || log_status.faulted) {
+            result = ESP_ERR_INVALID_STATE;
+        } else if (!log_status.recording) {
+            recording_generation++;
+            log_status.recording = true;
+        }
+    } else {
+        log_status.recording = false;
+        recording_generation++;
+        if (log_status.faulted) {
+            result = ESP_FAIL;
+        } else if (fflush(log_file) != 0 || fsync(fileno(log_file)) != 0) {
+            int flush_errno = errno;
+            log_status.write_error_count++;
+            mark_storage_fault_locked("stop flush", flush_errno);
+            clearerr(log_file);
+            result = ESP_FAIL;
+        }
+        refresh_space_locked();
+    }
+    xSemaphoreGive(log_mutex);
+    return result;
 }
 
 void telemetry_log_get_status(telemetry_log_status_t *status)
@@ -535,6 +581,8 @@ esp_err_t telemetry_log_clear(void)
 {
     if (log_mutex == NULL) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(log_mutex, portMAX_DELAY);
+    log_status.recording = false;
+    recording_generation++;
     if (log_file != NULL) {
         fflush(log_file);
         fsync(fileno(log_file));
@@ -580,15 +628,25 @@ esp_err_t telemetry_log_clear(void)
         }
     }
     refresh_space_locked();
+    if (result == ESP_OK) {
+        log_status.full = log_status.capacity_bytes > 0 &&
+                          log_status.free_bytes <= LOG_FREE_RESERVE_BYTES;
+    }
     xSemaphoreGive(log_mutex);
     return result;
 }
 
 #else
 
-esp_err_t telemetry_log_start(void)
+esp_err_t telemetry_log_init(void)
 {
     return ESP_OK;
+}
+
+esp_err_t telemetry_log_set_recording(bool recording)
+{
+    (void)recording;
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 void telemetry_log_get_status(telemetry_log_status_t *status)

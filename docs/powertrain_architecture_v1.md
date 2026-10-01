@@ -824,7 +824,33 @@ serial operation available. The expanded state JSON uses a dedicated static
 8 KiB buffer rather than the task stack.
 
 The firmware embeds `index.html`, `app.js`, and `style.css` from
-`tools/wifi_bridge/web`. Its direct HTTP surface is:
+`tools/wifi_bridge/web`. The viewer uses a light, responsive layout with four
+hash-addressable views (`#live`, `#logs`, `#calibrate`, and `#settings`). Phone
+navigation accounts for the home-indicator safe area; numeric inputs remain
+16 px and controls are at least 44 px tall. View changes keep the same DOM,
+polling loop, calibration workflow, configuration drafts, and loaded CSV.
+All eight analysis groups support pointer/touch inspection and keyboard
+sample stepping. The graph supports time-axis pinch/wheel/button zoom, drag
+and button panning, and a full-run reset. Zoom is bounded to the dataset and
+at most 1000x (minimum interval 1 ms). Y limits are derived from samples in
+the visible interval plus its immediate boundary neighbors, with clipped
+drawing so off-screen lines do not overlap axes. Switching groups or views
+preserves the window; loading another CSV resets it. The chart owns touch
+gestures, so page scrolling remains available outside its canvas. Keyboard
+`+`/`-` zoom, `0` resets, and Shift+arrows pan; regular arrows inspect samples.
+Older `#analysis` and `#calibration` links select the matching
+new view. No external runtime assets are required.
+
+Connection loss marks the retained readings as stale, reports unavailable
+controller status, and disables configuration/calibration and device-log
+actions. A three-second browser request timeout permits polling to recover
+from a stalled HTTP request; this is a viewer timeout only and changes no
+firmware safety deadlines. A visible calibration navigation indicator leads
+back to the existing workflow without restarting it. The UI redesign has
+Chrome/WebKit mock-browser and firmware-build validation; real iPhone Safari,
+SoftAP connectivity, and hardware workflows remain bench pending.
+
+Its direct HTTP surface is:
 
 - `GET /`, `/index.html`, `/app.js`, `/style.css`: embedded viewer assets.
 - `GET /api/state`: protocol-version-1 telemetry JSON containing controller
@@ -838,6 +864,9 @@ The firmware embeds `index.html`, `app.js`, and `style.css` from
   8 KiB chunks.
 - `POST /api/log/clear`: explicitly clear/recover logging storage; firmware
   rejects it unless the controller is `DISARMED`.
+- `POST /api/log/start`, `/api/log/stop`: explicitly start/stop CSV sampling in
+  any drive state, without changing powertrain outputs. Start rejects full,
+  faulted, or unavailable storage. Stop reports success only after flush/fsync.
 
 The accepted command subset matches the documented `config ...` commands,
 `tv enable|disable`, the exact one-way maintenance action `disarm config`, and
@@ -937,6 +966,26 @@ task and receiver interrupts. It obtains the public, mutex-protected
 stdio, FAT calls, and file export never run in the priority drive task or the
 receiver edge interrupt.
 
+`telemetry_log_init()` mounts the partition, opens/counts the existing CSV
+(or creates its header), and starts an idle worker. It never starts sampling.
+Every boot begins stopped, including when an existing CSV or saved NVS rate
+is present. The viewer's Start/Stop controls call
+`telemetry_log_set_recording(bool)` through dedicated HTTP routes; no new
+arbitrary-command or drive-control path is introduced. Telemetry advertises
+`logging.manual_control=true` so older firmware does not show working controls
+for endpoints it lacks.
+
+Start appends to the existing CSV. Stop takes the logger mutex, disables
+recording, and flushes/fsyncs before returning success. An I/O failure leaves
+recording stopped and reports a fault. A generation counter invalidates a row
+formatted outside the mutex across stop/start or clear, preventing an old
+in-flight row from being appended after a new recording begins. The idle
+worker skips row formatting/writes but continues observing the saved rate.
+Neither Wi-Fi reconnect, changing the sample rate, nor arming starts recording.
+Clear/recovery always leaves it stopped. Start and Stop are allowed while
+armed because they affect telemetry only; the existing clear and configuration
+DISARMED guards remain in force.
+
 `config logging rate <1-50>` changes the sampling rate while `DISARMED`.
 The live viewer exposes the same control in its Configuration section. The
 validated value is stored as `cfg/log_hz` in NVS, applies without rebooting,
@@ -964,7 +1013,7 @@ volume simultaneously reports a known capacity but no usable free clusters,
 the UI changes the confirmed action to `Recover log storage`. Firmware first
 deletes the CSV normally; if the 16 KiB reserve is still unavailable, it
 formats only the dedicated `logdata` FAT volume, recreates the header, and
-resumes logging. Firmware, NVS, and calibration partitions are outside that
+leaves recording stopped until Start is selected. Firmware, NVS, and calibration partitions are outside that
 operation.
 
 If append or flush I/O fails, the logger latches a storage-fault flag, records
@@ -1046,7 +1095,11 @@ points for responsiveness; export preserves every recorded row.
     cannot rearm until the operator physically cycles STOP/OFF-to-RUN/ON.
     Disconnect Wi-Fi for at least one minute, reconnect, export the CSV, and
     confirm timestamps/sample sequencing span the outage without missing
-    intervals. Confirm clear is rejected after arming and accepted only in
+    intervals. First verify no samples accrue after boot, explicit Start begins
+    recording, Stop freezes the sample count and saves the CSV, another Start
+    appends, and reboot/clear leave it stopped. Repeat Start/Stop while armed
+    with traction power disconnected and verify no output-state change.
+    Confirm clear is rejected after arming and accepted only in
     `DISARMED`. Remove controller power during a sacrificial run to characterize
     the documented final-buffer/corruption limit; do not use an important log.
 11. With the Dragy powered and traction power disconnected, verify GPIO4 sees

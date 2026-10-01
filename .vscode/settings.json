@@ -30,5 +30,5 @@
   ],
   "python-envs.defaultEnvManager": "ms-python.python:system",
   "idf.flashType": "UART",
-  "idf.portWin": "COM3"
+  "idf.port": "COM3"
 }

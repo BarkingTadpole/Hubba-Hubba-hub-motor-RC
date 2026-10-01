@@ -2,34 +2,38 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f7f6">
   <title>RC Car Control Monitor</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <div>
-      <p class="eyebrow">ESP32 POWERTRAIN</p>
-      <h1>RC Car Monitor</h1>
-    </div>
-    <div id="connection" class="connection offline">ESP32 viewer offline</div>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="app-header">
+    <a class="brand" href="#live" aria-label="RC Car Monitor home">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 16V8h8a4 4 0 0 1 0 8H4m6-4 7 7M4 12h8"/></svg></span>
+      <span><span class="eyebrow">VEHICLE CONTROL</span><strong>RC Car Monitor<span class="brand-dot">.</span></strong></span>
+    </a>
+    <div class="header-status"><span id="global-state" class="status-pill">Waiting for car</span><div id="connection" class="connection offline">ESP32 viewer offline</div></div>
   </header>
-
-  <main>
-    <section class="link-health panel compact-panel">
-      <div><span>Browser → ESP32</span><strong class="ok">Direct HTTP</strong></div>
-      <div><span>Access point</span><strong id="tcp-health">--</strong></div>
-      <div><span>Telemetry snapshot</span><strong id="telemetry-health">--</strong></div>
-      <div><span>Viewer API</span><strong id="protocol-health">--</strong></div>
-    </section>
+  <nav class="app-nav" aria-label="Main navigation">
+    <a href="#live" data-view="live" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Live</span></a>
+    <a href="#logs" data-view="logs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16h16M8 15l4-5 4 3 4-7"/></svg><span>Logs</span></a>
+    <a href="#calibrate" data-view="calibrate"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M12 3v18M19 3v18M2 8h6M9 16h6M16 9h6"/></svg><span>Calibrate</span><i id="cal-nav-indicator" hidden aria-label="Calibration active"></i></a>
+    <a href="#settings" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg><span>Settings</span></a>
+  </nav>
+  <main id="main" tabindex="-1">
+    <div id="freshness-notice" class="freshness-notice" role="status">Waiting for the car. Connect to its Wi-Fi to see live telemetry.</div>
+    <div data-page="live">
+      <div class="page-heading"><div><p class="eyebrow">YOUR CAR, AT A GLANCE</p><h1>Live overview</h1><p>Every signal. One clear view.</p></div><span class="refresh-note"><i></i> Updates every 250 ms</span></div>
     <section class="hero-grid">
       <article class="hero-card">
-        <span>Controller</span><strong id="state">--</strong><small id="state-detail">Waiting for telemetry</small>
+        <span>Controller</span><strong id="state" class="controller-value">--</strong><small id="state-detail">Waiting for telemetry</small>
       </article>
       <article class="hero-card">
         <span>Drivetrain</span><strong id="drive-mode">--</strong><small id="arm-cycle">Initial arm cycle --</small>
       </article>
-      <article class="hero-card">
+      <article class="hero-card speed-card">
         <span>Vehicle speed</span><strong><span id="speed">--</span> <em>km/h</em></strong><small id="steering-limit">Steering limit --</small>
       </article>
       <article class="hero-card">
@@ -41,18 +45,18 @@
     </section>
 
     <section>
-      <div class="section-title"><div><p class="eyebrow">LIVE INPUTS</p><h2>Receiver channels</h2></div><span>5 Hz telemetry</span></div>
+      <div class="section-title"><div><p class="eyebrow">LIVE INPUTS</p><h2>Receiver channels</h2></div><span>CH1 / CH2 / CH4 / CH5</span></div>
       <div id="receiver-grid" class="channel-grid"></div>
     </section>
 
     <section class="split">
       <article class="panel">
         <div class="section-title"><div><p class="eyebrow">WHEEL SPEED</p><h2>RPM sensors</h2></div></div>
-        <table><thead><tr><th>Wheel</th><th>RPM</th><th>Hz</th><th>Edges</th><th>State</th></tr></thead><tbody id="rpm-body"></tbody></table>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Wheel telemetry"><table><thead><tr><th>Wheel</th><th>RPM</th><th>Hz</th><th>Edges</th><th>State</th></tr></thead><tbody id="rpm-body"></tbody></table></div>
       </article>
       <article class="panel">
         <div class="section-title"><div><p class="eyebrow">PWM OUTPUT</p><h2>ESC channels</h2></div></div>
-        <table><thead><tr><th>Wheel</th><th>Throttle</th><th>Reverse</th><th>TV correction</th></tr></thead><tbody id="output-body"></tbody></table>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Wheel telemetry"><table><thead><tr><th>Wheel</th><th>Throttle</th><th>Reverse</th><th>TV correction</th></tr></thead><tbody id="output-body"></tbody></table></div>
       </article>
     </section>
 
@@ -101,6 +105,15 @@
       </article>
     </section>
 
+    <section class="link-health panel compact-panel">
+      <div><span>Browser → ESP32</span><strong class="ok">Direct HTTP</strong></div>
+      <div><span>Access point</span><strong id="tcp-health">--</strong></div>
+      <div><span>Telemetry snapshot</span><strong id="telemetry-health">--</strong></div>
+      <div><span>Viewer API</span><strong id="protocol-health">--</strong></div>
+    </section>
+    </div>
+    <div data-page="calibrate" hidden>
+      <div class="page-heading"><div><p class="eyebrow">MAKE IT PRECISE</p><h1>Calibrate your car</h1><p>Guided setup, one position at a time.</p></div></div>
     <section id="calibration">
       <div class="section-title">
         <div><p class="eyebrow">GUIDED SETUP</p><h2>Calibration console</h2></div>
@@ -142,9 +155,12 @@
           <p class="hint warning">Lift and restrain the car. ESC endpoint calibration starts with traction power disconnected. Manual relay follows receiver throttle on all four ESCs for at most 30 seconds. Reverse outputs remain low.</p>
         </article>
       </div>
-      <p id="cal-message" class="message">No calibration command sent.</p>
+      <p id="cal-message" class="message" role="status">No calibration command sent.</p>
     </section>
 
+    </div>
+    <div data-page="logs" hidden>
+      <div class="page-heading"><div><p class="eyebrow">AFTER THE DRIVE</p><h1>Logs &amp; insights</h1><p>Save a run. See the whole story.</p></div></div>
     <section>
       <div class="section-title">
         <div><p class="eyebrow">INTERNAL FLASH</p><h2>Offline CSV recorder</h2></div>
@@ -159,6 +175,11 @@
             <div><dt>Logging rate</dt><dd id="log-interval">--</dd></div>
             <div><dt>Write errors</dt><dd id="log-errors">--</dd></div>
           </dl>
+          <div class="log-actions" role="group" aria-label="Recording controls">
+            <button id="start-recording" type="button" disabled>Start recording</button>
+            <button id="stop-recording" type="button" disabled>Stop recording</button>
+          </div>
+          <p class="hint">Recording starts only when you choose Start. Stop saves buffered samples. Starting again appends to the same CSV. Recording stays stopped after a reset or clear.</p>
           <div class="log-actions">
             <a id="download-log" class="button-link disabled" href="/api/log.csv" download>Export device CSV</a>
             <button id="clear-log" class="danger" disabled>Clear after export</button>
@@ -171,7 +192,7 @@
           <p class="hint">Internal flash is finite. For indefinite or 50 Hz logging, add a microSD card or external flash. The last buffered second can be lost if controller power is removed without warning.</p>
         </article>
       </div>
-      <p id="log-message" class="message">No log operation requested.</p>
+      <p id="log-message" class="message" role="status">No log operation requested.</p>
     </section>
 
     <section id="analysis">
@@ -200,12 +221,24 @@
           <div><span>Peak speed</span><strong id="analysis-speed">--</strong></div>
           <div><span>Peak wheel RPM</span><strong id="analysis-rpm">--</strong></div>
         </div>
+        <div class="chart-controls" role="group" aria-label="Graph zoom and pan">
+          <button id="chart-zoom-in" type="button" disabled aria-label="Zoom in">+ Zoom</button>
+          <button id="chart-zoom-out" type="button" disabled aria-label="Zoom out">− Zoom</button>
+          <button id="chart-pan-left" type="button" disabled aria-label="Pan earlier">← Earlier</button>
+          <button id="chart-pan-right" type="button" disabled aria-label="Pan later">Later →</button>
+          <button id="chart-reset" type="button" disabled>Reset zoom</button>
+          <span id="chart-range" role="status">Full run</span>
+        </div>
+        <p class="chart-help">Pinch or scroll over the graph to zoom; drag to move through time. Tap for sample values. Scroll the page outside the graph. Keyboard: + / − to zoom, 0 to reset, Shift + arrows to pan.</p>
         <div id="chart-legend" class="chart-legend"></div>
-        <div class="chart-wrap"><canvas id="analysis-chart" width="1280" height="460" aria-label="Telemetry time-series plot"></canvas><div id="chart-tooltip" class="chart-tooltip" hidden></div></div>
-        <p id="analysis-message" class="message">Export a run or load the current on-device CSV to begin.</p>
+        <div class="chart-wrap"><canvas tabindex="0" id="analysis-chart" width="1280" height="460" aria-label="Telemetry time-series plot. Pinch to zoom, drag to pan, or tap to inspect. Arrow keys select samples; plus and minus zoom; zero resets; Shift and arrows pan."></canvas><div id="chart-tooltip" class="chart-tooltip" hidden></div></div>
+        <p id="analysis-message" class="message" role="status">Export a run or load the current on-device CSV to begin.</p>
       </article>
     </section>
 
+    </div>
+    <div data-page="settings" hidden>
+      <div class="page-heading"><div><p class="eyebrow">SET UP YOUR DRIVE</p><h1>Vehicle settings</h1><p>Saved on the car. Ready for the next run.</p></div></div>
     <section>
       <div class="section-title">
         <div><p class="eyebrow">PERSISTENT NVS</p><h2>Configuration</h2></div>
@@ -216,27 +249,35 @@
           <button id="reload-config" type="button">Load saved config</button>
         </div>
       </div>
-      <div class="config-grid">
-        <form data-builder="logging-rate"><label>Logging rate (Hz)<input name="value" type="number" min="1" max="50" step="1" value="5"></label><button>Save</button></form>
+      <p id="message" class="message" role="status">No configuration command sent.</p>
+      <div class="config-group"><h3>Drive & safety</h3><p class="hint">Power delivery and receiver protection.</p><div class="config-grid">
         <form data-builder="drivetrain"><label>Drivetrain<select name="value"><option>awd</option><option>fwd</option><option>rwd</option></select></label><div class="button-row"><button>Save</button><button id="cycle-drivetrain" type="button">Cycle</button></div></form>
         <form data-builder="arm-latch"><label>Permanent arm latch<select name="value"><option value="on">Enabled until power loss</option><option value="off">Disabled — STOP disarms</option></select></label><button>Save</button></form>
         <form data-builder="reverse"><label>Reverse limit (%)<input name="value" type="number" min="0" max="100"></label><button>Save</button></form>
         <form data-builder="drive-smoothing"><label>Drive smoothing (%) — 0 off, 100 smoothest<input name="value" type="number" min="0" max="100" step="1"></label><button>Save</button></form>
-        <form data-builder="poles"><label>Motor poles (legacy)<input name="value" type="number" min="2" max="60" step="2"></label><button>Save</button></form>
-        <form data-builder="ppr"><label>RPM pulses/rev<input name="value" type="number" min="1" max="120"></label><button>Save</button></form>
+        <form data-builder="failsafe"><label>Failsafe pulse / window<div class="inline"><input aria-label="Failsafe pulse (us)" name="pulse" type="number" min="800" max="2200"><input aria-label="Failsafe window (us)" name="window" type="number" min="1" max="100"></div></label><div class="button-row"><button>Save</button><button type="button" data-command="config failsafe off">Disable</button></div></form>
+      </div></div>
+      <div class="config-group"><h3>Steering</h3><p class="hint">Center, smoothness, and the speed envelope.</p><div class="config-grid">
         <form data-builder="trim"><label>Steering trim (deg)<input name="value" type="number" min="-15" max="15" step="0.1"></label><button>Save</button></form>
         <form data-builder="smoothing"><label>Steering smoothing (ms)<input name="value" type="number" min="0" max="500"></label><button>Save</button></form>
         <form data-builder="speed-limit"><label>Speed steering limit<select name="value"><option value="on">On</option><option value="off">Off</option></select></label><button>Save</button></form>
         <form data-builder="lateral-g"><label>Steering lateral ceiling (g)<input name="value" type="number" min="0.2" max="3" step="0.05"></label><button>Save</button></form>
+      </div></div>
+      <div class="config-group"><h3>Torque vectoring</h3><p class="hint">Assistance, correction limits, and controller gains.</p><div class="config-grid">
         <form data-builder="tv-enabled"><label>Torque vectoring<select name="value"><option value="enable">Enabled</option><option value="disable">Disabled</option></select></label><button>Save</button></form>
         <form data-builder="tv-authority"><label>TV authority (%)<input name="value" type="number" min="0" max="25"></label><button>Save</button></form>
         <form data-builder="front-relief"><label>Front relief (%)<input name="value" type="number" min="0" max="50"></label><button>Save</button></form>
         <form data-builder="yaw-sign"><label>IMU yaw sign<select name="value"><option value="1">+1</option><option value="-1">-1</option></select></label><button>Save</button></form>
-        <form data-builder="failsafe"><label>Failsafe pulse / window<div class="inline"><input name="pulse" type="number" min="800" max="2200"><input name="window" type="number" min="1" max="100"></div></label><div class="button-row"><button>Save</button><button type="button" data-command="config failsafe off">Disable</button></div></form>
-        <form class="wide" data-builder="tv-gains"><label>TV gains: yaw target, turn RPM, yaw Kp, yaw Ki, RPM Kp<div class="gain-grid"><input name="yaw" type="number" min="0" max="500" step="1"><input name="turn" type="number" min="0" max="1" step="0.01"><input name="kp" type="number" min="0" max="0.01" step="0.00001"><input name="ki" type="number" min="0" max="0.01" step="0.00001"><input name="rpm" type="number" min="0" max="5" step="0.01"></div></label><button>Save gains</button></form>
-      </div>
-      <p id="message" class="message">No configuration command sent.</p>
+        <form class="wide" data-builder="tv-gains"><label>TV gains: yaw target, turn RPM, yaw Kp, yaw Ki, RPM Kp<div class="gain-grid"><span class="gain-field"><span>Yaw target</span><input aria-label="Yaw target" name="yaw" type="number" min="0" max="500" step="1"></span><span class="gain-field"><span>Turn RPM</span><input aria-label="Turn RPM" name="turn" type="number" min="0" max="1" step="0.01"></span><span class="gain-field"><span>Yaw Kp</span><input aria-label="Yaw Kp" name="kp" type="number" min="0" max="0.01" step="0.00001"></span><span class="gain-field"><span>Yaw Ki</span><input aria-label="Yaw Ki" name="ki" type="number" min="0" max="0.01" step="0.00001"></span><span class="gain-field"><span>RPM Kp</span><input aria-label="RPM Kp" name="rpm" type="number" min="0" max="5" step="0.01"></span></div></label><button>Save gains</button></form>
+      </div></div>
+      <div class="config-group"><h3>Sensors & recording</h3><p class="hint">Wheel-speed conversion and offline sample rate.</p><div class="config-grid">
+        <form data-builder="ppr"><label>RPM pulses/rev<input name="value" type="number" min="1" max="120"></label><button>Save</button></form>
+        <form data-builder="poles"><label>Motor poles (legacy)<input name="value" type="number" min="2" max="60" step="2"></label><button>Save</button></form>
+        <form data-builder="logging-rate"><label>Logging rate (Hz)<input name="value" type="number" min="1" max="50" step="1" value="1"></label><button>Save</button></form>
+      </div></div>
     </section>
+    </div>
+    <footer>RC Car Monitor <span>ESP32 / Four independent motors</span></footer>
   </main>
   <script src="/app.js"></script>
 </body>

@@ -69,7 +69,7 @@ class FirmwareSoftApViewerTest(unittest.TestCase):
         self.assertIn("httpd_start", source)
         for route in (
             "/api/state", "/api/config", "/api/calibration", "/api/disarm",
-            "/api/log.csv", "/api/log/clear",
+            "/api/log.csv", "/api/log/clear", "/api/log/start", "/api/log/stop",
         ):
             self.assertIn(route, source)
         self.assertIn("esp_http_server", cmake)
@@ -216,6 +216,8 @@ class FakeEsp:
                         )
                     elif text.startswith("L ") and text.endswith(" CLEAR"):
                         client.sendall(f"R {text.split()[1]} OK test log cleared\n".encode())
+                    elif text.startswith("L ") and text.split()[-1] in {"START", "STOP"}:
+                        client.sendall(f"R {text.split()[1]} OK test log {text.split()[-1].lower()}\n".encode())
 
 
 class ReconnectingFakeEsp:
@@ -419,6 +421,12 @@ class BridgeIntegrationTest(unittest.TestCase):
             )
             with urllib.request.urlopen(clear_request) as response:
                 self.assertTrue(json.load(response)["ok"])
+            for action in ("start", "stop"):
+                request = urllib.request.Request(base + "/api/log/" + action, data=b"", method="POST")
+                with urllib.request.urlopen(request) as response:
+                    result = json.load(response)
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["message"], "test log " + action)
         finally:
             server.shutdown()
             server.server_close()
