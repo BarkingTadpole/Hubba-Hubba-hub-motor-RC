@@ -64,6 +64,7 @@ env/
 # Language Servers
 .clangd/
 .ccls-cache/
+/.cache/clangd/
 compile_commands.json
 
 # Windows specific
@@ -72,6 +73,7 @@ ehthumbs.db
 Desktop.ini
 
 # User-specific configuration files
+/.vscode/c_cpp_properties.json
 *.user
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
@@ -82,3 +84,7 @@ docs/**/*
 
 #VCU Development
 Hubba_Hubba_VCU/**/*
+
+# Keep the current engineering and showcase handoff documents in version control.
+!docs/powertrain_architecture_v1.md
+!docs/project_showcase_handoff.md

@@ -15,22 +15,15 @@ typedef enum {
     REMOTE_CONFIG_FAILSAFE_ENABLED,
     REMOTE_CONFIG_RPM_POLES,
     REMOTE_CONFIG_RPM_PPR,
-    REMOTE_CONFIG_STEERING_TRIM,
     REMOTE_CONFIG_STEERING_SMOOTHING,
-    REMOTE_CONFIG_STEERING_SPEED_LIMIT,
-    REMOTE_CONFIG_STEERING_LATERAL_G,
-    REMOTE_CONFIG_TV_ENABLED,
-    REMOTE_CONFIG_TV_AUTHORITY,
-    REMOTE_CONFIG_TV_FRONT_RELIEF,
-    REMOTE_CONFIG_TV_GAINS,
-    REMOTE_CONFIG_IMU_YAW_SIGN,
+    REMOTE_CONFIG_STEERING_SERVO,
+    REMOTE_CONFIG_STEERING_GEOMETRY,
+    REMOTE_CONFIG_STEERING_INPUT,
+    REMOTE_CONFIG_ACKERMANN,
     REMOTE_CONFIG_ARM_LATCH,
-    REMOTE_CONFIG_LOGGING_RATE,
     REMOTE_CALIBRATE_THROTTLE,
     REMOTE_CALIBRATE_STEERING,
     REMOTE_CALIBRATE_ARM,
-    REMOTE_CALIBRATE_TV,
-    REMOTE_CALIBRATE_IMU,
     REMOTE_CALIBRATE_CAPTURE,
     REMOTE_CALIBRATE_ESC_ARM,
     REMOTE_CALIBRATE_ESC_MAX,
@@ -44,8 +37,11 @@ typedef struct {
     drivetrain_mode_t drivetrain_mode;
     bool enabled;
     uint32_t unsigned_values[2];
-    float float_values[5];
-    int32_t signed_value;
+    steering_servo_config_t servo;
+    steering_geometry_t geometry;
+    steering_calibration_t steering_input;
+    uint16_t point_count;
+    ackermann_point_t points[ACKERMANN_MAX_POINTS];
 } remote_command_t;
 
 bool remote_command_parse(const char *line,

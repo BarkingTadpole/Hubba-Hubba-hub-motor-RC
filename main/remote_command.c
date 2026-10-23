@@ -1,5 +1,9 @@
 #include "remote_command.h"
+#include "independent_steering.h"
+#include "calibration_validation.h"
 
+#include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +17,7 @@ static void set_error(char *error, size_t error_size, const char *message)
 
 static bool parse_unsigned(const char *text, uint32_t maximum, uint32_t *value)
 {
+    if (text[0] < '0' || text[0] > '9') return false;
     char *end = NULL;
     unsigned long parsed = strtoul(text, &end, 10);
     if (text[0] == '\0' || end == NULL || *end != '\0' || parsed > maximum) {
@@ -20,6 +25,24 @@ static bool parse_unsigned(const char *text, uint32_t maximum, uint32_t *value)
     }
     *value = (uint32_t)parsed;
     return true;
+}
+
+/* Decode bounded fixed-point fields before narrowing to persisted integers. */
+static bool parse_fixed_values(const char *text, uint16_t *values, size_t count, bool tenths)
+{
+    for (size_t i = 0; i < count; i++) {
+        while (isspace((unsigned char)*text)) text++;
+        char *end;
+        float value = strtof(text, &end);
+        float scaled = value * (tenths ? 10.0f : 1.0f);
+        if (end == text || (*end != '\0' && !isspace((unsigned char)*end)) ||
+            !isfinite(scaled) || scaled < 0.0f || scaled > UINT16_MAX ||
+            fabsf(scaled - roundf(scaled)) > 0.001f) return false;
+        values[i] = (uint16_t)lroundf(scaled);
+        text = end;
+    }
+    while (isspace((unsigned char)*text)) text++;
+    return *text == '\0';
 }
 
 bool remote_command_parse(const char *line,
@@ -47,14 +70,6 @@ bool remote_command_parse(const char *line,
     }
     if (strcmp(line, "cal arm") == 0) {
         command->operation = REMOTE_CALIBRATE_ARM;
-        return true;
-    }
-    if (strcmp(line, "cal tv") == 0) {
-        command->operation = REMOTE_CALIBRATE_TV;
-        return true;
-    }
-    if (strcmp(line, "cal imu") == 0) {
-        command->operation = REMOTE_CALIBRATE_IMU;
         return true;
     }
     if (strcmp(line, "cal capture") == 0) {
@@ -149,18 +164,6 @@ bool remote_command_parse(const char *line,
         set_error(error, error_size, "usage: config rpm ppr <1-120>");
         return false;
     }
-    if (strncmp(line, "config steering trim ", 21) == 0) {
-        float trim = 0.0f;
-        char extra = '\0';
-        if (sscanf(line + 21, "%f %c", &trim, &extra) == 1 &&
-            trim >= -15.0f && trim <= 15.0f) {
-            command->operation = REMOTE_CONFIG_STEERING_TRIM;
-            command->float_values[0] = trim;
-            return true;
-        }
-        set_error(error, error_size, "usage: config steering trim <-15..15>");
-        return false;
-    }
     if (strncmp(line, "config steering smoothing ", 26) == 0) {
         command->operation = REMOTE_CONFIG_STEERING_SMOOTHING;
         if (parse_unsigned(line + 26, 500, &command->unsigned_values[0])) {
@@ -170,71 +173,77 @@ bool remote_command_parse(const char *line,
                   "usage: config steering smoothing <0-500>");
         return false;
     }
-    if (strcmp(line, "config steering speed-limit on") == 0 ||
-        strcmp(line, "config steering speed-limit off") == 0) {
-        command->operation = REMOTE_CONFIG_STEERING_SPEED_LIMIT;
-        command->enabled = strcmp(line, "config steering speed-limit on") == 0;
-        return true;
-    }
-    if (strncmp(line, "config steering lateral-g ", 26) == 0) {
-        float lateral_g = 0.0f;
-        char extra = '\0';
-        if (sscanf(line + 26, "%f %c", &lateral_g, &extra) == 1 &&
-            lateral_g >= 0.2f && lateral_g <= 3.0f) {
-            command->operation = REMOTE_CONFIG_STEERING_LATERAL_G;
-            command->float_values[0] = lateral_g;
-            return true;
+    if (strncmp(line, "config steering servo ", 22) == 0) {
+        const char *cursor = line + 22;
+        bool left = strncmp(cursor, "left ", 5) == 0;
+        bool right = strncmp(cursor, "right ", 6) == 0;
+        uint16_t values[5];
+        /* PWM fields are integers; angle fields allow one decimal. */
+        if ((left || right) && parse_fixed_values(cursor + (left ? 5 : 6), values, 5, true) &&
+            values[0] % 10 == 0 && values[1] % 10 == 0 && values[2] % 10 == 0) {
+            command->servo = (steering_servo_config_t){
+                values[0] / 10, values[1] / 10, values[2] / 10, values[3], values[4]};
+            if (steering_servo_config_valid(&command->servo)) {
+                command->operation = REMOTE_CONFIG_STEERING_SERVO;
+                command->unsigned_values[0] = left ? STEERING_LEFT : STEERING_RIGHT;
+                return true;
+            }
         }
-        set_error(error, error_size,
-                  "usage: config steering lateral-g <0.2-3.0>");
+        set_error(error, error_size, "use config steering servo <left|right> <left_us> <center_us> <right_us> <left_deg> <right_deg>; PWM 800-2200, angle magnitudes 1-85");
         return false;
     }
-    if (strcmp(line, "tv enable") == 0 || strcmp(line, "tv disable") == 0) {
-        command->operation = REMOTE_CONFIG_TV_ENABLED;
-        command->enabled = strcmp(line, "tv enable") == 0;
-        return true;
-    }
-    if (strncmp(line, "config tv authority ", 20) == 0) {
-        command->operation = REMOTE_CONFIG_TV_AUTHORITY;
-        if (parse_unsigned(line + 20, 25, &command->unsigned_values[0])) {
-            return true;
+    if (strncmp(line, "config steering geometry ", 25) == 0) {
+        uint16_t values[5];
+        if (parse_fixed_values(line + 25, values, 5, true)) {
+            command->geometry = (steering_geometry_t){values[0], values[1], values[2], values[3], values[4]};
+            if (steering_geometry_valid(&command->geometry)) {
+                command->operation = REMOTE_CONFIG_STEERING_GEOMETRY;
+                return true;
+            }
         }
-        set_error(error, error_size, "usage: config tv authority <0-25>");
+        set_error(error, error_size, "use config steering geometry <wheelbase_mm> <track_mm> <diameter_mm> <max_left_deg> <max_right_deg>; 50-2000 / 50-2000 / 10-500 mm, angles 1-85, one decimal");
         return false;
     }
-    if (strncmp(line, "config tv front-relief ", 23) == 0) {
-        command->operation = REMOTE_CONFIG_TV_FRONT_RELIEF;
-        if (parse_unsigned(line + 23, 50, &command->unsigned_values[0])) {
+    if (strncmp(line, "config steering input ", 22) == 0) {
+        uint16_t values[4];
+        if (parse_fixed_values(line + 22, values, 4, false) &&
+            calibration_steering_valid(values[0], values[1], values[2], values[3])) {
+            command->operation = REMOTE_CONFIG_STEERING_INPUT;
+            command->steering_input = (steering_calibration_t){
+                .left_us = values[0], .center_us = values[1], .right_us = values[2], .deadband_us = values[3]};
             return true;
         }
-        set_error(error, error_size, "usage: config tv front-relief <0-50>");
+        set_error(error, error_size, "use config steering input <left_us> <center_us> <right_us> <deadband_us>; 800-2200, center bracketed >=150us, deadband 0-150 and less than each span");
         return false;
     }
-    if (strncmp(line, "config tv gains ", 16) == 0) {
-        char extra = '\0';
-        int fields = sscanf(line + 16, "%f %f %f %f %f %c",
-                            &command->float_values[0], &command->float_values[1],
-                            &command->float_values[2], &command->float_values[3],
-                            &command->float_values[4], &extra);
-        if (fields == 5 && command->float_values[0] >= 0.0f &&
-            command->float_values[0] <= 500.0f &&
-            command->float_values[1] >= 0.0f && command->float_values[1] <= 1.0f &&
-            command->float_values[2] >= 0.0f && command->float_values[2] <= 0.01f &&
-            command->float_values[3] >= 0.0f && command->float_values[3] <= 0.01f &&
-            command->float_values[4] >= 0.0f && command->float_values[4] <= 5.0f) {
-            command->operation = REMOTE_CONFIG_TV_GAINS;
+    if (strncmp(line, "config steering ackermann-strength ", 35) == 0) {
+        const char *cursor = line + 35;
+        while (*cursor != '\0') {
+            if (command->point_count >= ACKERMANN_MAX_POINTS) goto invalid_ackermann;
+            char *end;
+            float speed = strtof(cursor, &end);
+            if (end == cursor || *end != ':' || !isfinite(speed) || speed < 0 || speed > 300) goto invalid_ackermann;
+            cursor = end + 1;
+            float percent = strtof(cursor, &end);
+            if (end == cursor || !isfinite(percent) || percent < 0 || percent > 100 ||
+                (*end != '\0' && !isspace((unsigned char)*end))) goto invalid_ackermann;
+            /* Reject extra precision rather than silently changing a user's curve. */
+            float speed10 = speed * 10.0f, percent10 = percent * 10.0f;
+            if (fabsf(speed10 - roundf(speed10)) > 0.001f ||
+                fabsf(percent10 - roundf(percent10)) > 0.001f) goto invalid_ackermann;
+            command->points[command->point_count++] = (ackermann_point_t){
+                (uint16_t)lroundf(speed10), (uint16_t)lroundf(percent10),
+            };
+            cursor = end;
+            while (isspace((unsigned char)*cursor)) cursor++;
+        }
+        if (*cursor == '\0' && ackermann_curve_valid(command->points, command->point_count)) {
+            command->operation = REMOTE_CONFIG_ACKERMANN;
             return true;
         }
-        set_error(error, error_size,
-                  "usage: config tv gains <yaw 0-500> <turn_rpm 0-1> "
-                  "<yaw_kp 0-.01> <yaw_ki 0-.01> <rpm_kp 0-5>");
+invalid_ackermann:
+        set_error(error, error_size, "use 2-8 speed:percent points, first speed 0, ascending speeds 0-300 km/h, Ackermann strength 0..100, at most one decimal");
         return false;
-    }
-    if (strcmp(line, "config imu yaw-sign -1") == 0 ||
-        strcmp(line, "config imu yaw-sign 1") == 0) {
-        command->operation = REMOTE_CONFIG_IMU_YAW_SIGN;
-        command->signed_value = line[20] == '-' ? -1 : 1;
-        return true;
     }
     if (strcmp(line, "config arm-latch on") == 0 ||
         strcmp(line, "config arm-latch off") == 0) {
@@ -242,18 +251,8 @@ bool remote_command_parse(const char *line,
         command->enabled = strcmp(line, "config arm-latch on") == 0;
         return true;
     }
-    if (strncmp(line, "config logging rate ", 20) == 0) {
-        command->operation = REMOTE_CONFIG_LOGGING_RATE;
-        if (parse_unsigned(line + 20, 50, &command->unsigned_values[0]) &&
-            command->unsigned_values[0] >= 1) {
-            return true;
-        }
-        set_error(error, error_size, "usage: config logging rate <1-50>");
-        return false;
-    }
-
     set_error(error, error_size,
               "unsupported command; remote access allows configuration, "
-              "calibration, tv enable/disable, and disarm config only");
+              "calibration, and disarm config only");
     return false;
 }

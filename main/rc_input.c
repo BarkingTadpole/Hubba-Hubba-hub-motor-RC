@@ -36,10 +36,6 @@ static rc_channel_state_t channels[RC_CHANNEL_COUNT] = {
         .gpio = PIN_RC_ARM_INPUT,
         .lock = portMUX_INITIALIZER_UNLOCKED,
     },
-    [RC_CHANNEL_TV_MODE] = {
-        .gpio = PIN_RC_TV_MODE_INPUT,
-        .lock = portMUX_INITIALIZER_UNLOCKED,
-    },
 };
 
 static void IRAM_ATTR rc_channel_isr(void *arg)
@@ -88,7 +84,7 @@ esp_err_t rc_input_init(void)
     }
 
     /*
-     * Telemetry logging writes to internal flash. Keep receiver edge capture
+     * Configuration saves write to internal flash. Keep receiver edge capture
      * running while the flash cache is disabled or a delayed edge can look
      * like a valid but badly distorted PWM pulse. The ISR therefore uses only
      * IRAM/DRAM-safe operations, including a direct GPIO input-register read.
@@ -129,11 +125,4 @@ bool rc_input_is_valid(rc_channel_id_t channel)
 {
     rc_channel_sample_t sample;
     return rc_input_get(channel, &sample);
-}
-
-uint16_t rc_input_pulse_us(rc_channel_id_t channel)
-{
-    rc_channel_sample_t sample = {0};
-    rc_input_get(channel, &sample);
-    return sample.pulse_us;
 }

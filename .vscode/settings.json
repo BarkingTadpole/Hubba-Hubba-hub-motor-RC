@@ -18,7 +18,7 @@
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
-  "idf.currentSetup": "C:\\esp\\v6.0.1\\esp-idf",
+  "idf.currentSetup": "/Users/ahmadarab/.espressif/v6.1/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32"
   },
@@ -30,5 +30,5 @@
   ],
   "python-envs.defaultEnvManager": "ms-python.python:system",
   "idf.flashType": "UART",
-  "idf.port": "COM3"
+  "idf.port": "/dev/tty.usbserial-0001"
 }

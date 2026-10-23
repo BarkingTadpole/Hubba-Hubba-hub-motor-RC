@@ -1,0 +1,146 @@
+{
+  "protocol": 3,
+  "uptime_ms": 1000,
+  "state": "DISARMED",
+  "armed": false,
+  "inhibited": false,
+  "inhibit_flags": 0,
+  "inhibit_count": 0,
+  "initial_arm_cycle_ready": true,
+  "drive_mode": "AWD",
+  "calibration": {
+    "active": false,
+    "sampling": false,
+    "kind": "none",
+    "step": 0,
+    "total_steps": 0,
+    "values_us": [
+      0,
+      0,
+      0
+    ],
+    "prompt": "",
+    "message": "Mock calibration idle"
+  },
+  "rc": {
+    "throttle": {
+      "valid": true,
+      "us": 1514,
+      "age_ms": 4
+    },
+    "steering": {
+      "valid": true,
+      "us": 1518,
+      "age_ms": 5
+    },
+    "arm": {
+      "valid": true,
+      "us": 2049,
+      "age_ms": 7
+    }
+  },
+  "steering": {
+    "left_us": 1500,
+    "right_us": 1500,
+    "filter_us": 1518,
+    "filter_active": true,
+    "rejected_spikes": 2,
+    "speed_valid": true,
+    "speed_held": false,
+    "speed_kmh": 24.3,
+    "command": 0.0,
+    "ackermann_strength_percent": 25.0,
+    "left_angle_deg": 0,
+    "right_angle_deg": 0
+  },
+  "rpm": {
+    "ppr": 7,
+    "wheels": [
+      {
+        "wheel": "RL",
+        "valid": true,
+        "rpm": 1332,
+        "hz": 146.0,
+        "edges": 21,
+        "window_us": 144000
+      },
+      {
+        "wheel": "RR",
+        "valid": true,
+        "rpm": 1327,
+        "hz": 145.6,
+        "edges": 20,
+        "window_us": 137000
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "throttle_us": 1100,
+      "reverse_us": 1100
+    },
+    {
+      "throttle_us": 1100,
+      "reverse_us": 1100
+    },
+    {
+      "throttle_us": 1100,
+      "reverse_us": 1100
+    },
+    {
+      "throttle_us": 1100,
+      "reverse_us": 1100
+    }
+  ],
+  "config": {
+    "loaded_from_nvs": true,
+    "reverse_limit_percent": 100,
+    "drive_smoothing_percent": 100,
+    "failsafe_enabled": true,
+    "failsafe_us": 1565,
+    "failsafe_window_us": 10,
+    "motor_poles": 14,
+    "rpm_ppr": 7,
+    "steering_smoothing_ms": 10,
+    "permanent_arm_latch": true,
+    "servos": [
+      {
+        "left_us": 2000,
+        "center_us": 1500,
+        "right_us": 1000,
+        "left_angle_deg": 30,
+        "right_angle_deg": 30
+      },
+      {
+        "left_us": 1000,
+        "center_us": 1500,
+        "right_us": 2000,
+        "left_angle_deg": 30,
+        "right_angle_deg": 30
+      }
+    ],
+    "ackermann_strength_points": [
+      {
+        "speed_kmh": 0,
+        "percent": 50
+      },
+      {
+        "speed_kmh": 50,
+        "percent": 0
+      }
+    ],
+    "steering_geometry": {
+      "wheelbase_mm": 445,
+      "track_width_mm": 320,
+      "wheel_diameter_mm": 107,
+      "max_left_deg": 30,
+      "max_right_deg": 30
+    },
+    "steering_input": {
+      "left_us": 2050,
+      "center_us": 1518,
+      "right_us": 987,
+      "deadband_us": 30
+    }
+  }
+}

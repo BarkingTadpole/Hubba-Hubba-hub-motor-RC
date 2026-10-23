@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f2f4f6">
+  <title>RC Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="app-header">
+    <a class="brand" href="#live">RC Monitor</a>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="#live" data-view="live" aria-current="page">Live</a>
+      <a href="#calibrate" data-view="calibrate">Calibrate<i id="cal-nav-indicator" hidden aria-label="Calibration active"></i></a>
+      <a href="#settings" data-view="settings">Settings</a>
+    </nav>
+    <div class="header-status">
+      <span id="global-state" class="status-pill">No telemetry</span>
+      <span id="connection" class="connection offline">Offline</span>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div id="freshness-notice" class="freshness-notice" role="status">No telemetry. Connect to RC-Car-ESP32 Wi-Fi.</div>
+
+    <div data-page="live">
+      <div class="page-heading"><h1>Telemetry</h1><span class="refresh-note">Poll 250 ms</span></div>
+      <section class="status-strip" aria-label="Drive status">
+        <div class="metric speed-metric">
+          <span>Rear speed</span><strong><span id="speed">--</span> <small>km/h</small></strong>
+          <small id="speed-state">Unavailable</small>
+        </div>
+        <div class="metric">
+          <span>Drivetrain</span><strong id="drive-mode">--</strong>
+          <small id="arm-cycle">Arm cycle --</small>
+        </div>
+        <div class="metric output-metric">
+          <span>Motor outputs</span><strong id="state-detail">--</strong>
+          <small id="latch-state">Arm latch --</small>
+        </div>
+      </section>
+
+      <div class="live-grid">
+        <section class="panel receiver-panel" aria-labelledby="receiver-heading">
+          <div class="section-title"><h2 id="receiver-heading">Receiver</h2></div>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Receiver PWM and frame age">
+            <table><thead><tr><th scope="col">Channel</th><th scope="col">PWM (µs)</th><th scope="col">Age (ms)</th><th scope="col">State</th></tr></thead><tbody id="receiver-grid"></tbody></table>
+          </div>
+        </section>
+
+        <section class="panel steering-panel" aria-labelledby="steering-heading">
+          <div class="section-title"><h2 id="steering-heading">Steering</h2><a href="#settings">Configure</a></div>
+          <table><thead><tr><th scope="col">Servo</th><th scope="col">GPIO</th><th scope="col">PWM</th><th scope="col">Target (°)</th></tr></thead><tbody>
+            <tr><th scope="row">Left</th><td>32</td><td id="servo-left-us">--</td><td id="servo-left-angle">--</td></tr>
+            <tr><th scope="row">Right</th><td>26</td><td id="servo-right-us">--</td><td id="servo-right-angle">--</td></tr>
+          </tbody></table>
+          <p class="hint target-note">Angle targets: + right; not measured.</p>
+          <dl class="steering-readings">
+            <div><dt>Command (+ right)</dt><dd id="steering-command">--</dd></div>
+            <div><dt>Ackermann strength</dt><dd id="ackermann-live">--</dd></div>
+            <div><dt>Input filter</dt><dd id="steering-filter">--</dd></div>
+          </dl>
+        </section>
+
+        <section class="panel esc-panel" aria-labelledby="esc-heading">
+          <div class="section-title"><h2 id="esc-heading">ESC outputs</h2><span>50 Hz</span></div>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="ESC PWM outputs">
+            <table><thead><tr><th scope="col">Wheel</th><th scope="col">Throttle (µs)</th><th scope="col">Reverse (µs)</th></tr></thead><tbody id="output-body"></tbody></table>
+          </div>
+        </section>
+
+        <section class="panel rpm-panel" aria-labelledby="rpm-heading">
+          <div class="section-title"><h2 id="rpm-heading">Rear RPM</h2></div>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Rear wheel speed sensors">
+            <table><thead><tr><th scope="col">Wheel</th><th scope="col">RPM</th><th scope="col">Hz</th><th scope="col">Edges</th><th scope="col">State</th></tr></thead><tbody id="rpm-body"></tbody></table>
+          </div>
+        </section>
+      </div>
+
+      <aside class="link-health" aria-label="Connection diagnostics">
+        <span>HTTP <strong id="http-health">--</strong></span>
+        <span>Snapshot <strong id="telemetry-health">--</strong></span>
+        <span>Protocol <strong id="protocol-health">--</strong></span>
+      </aside>
+    </div>
+
+    <div data-page="calibrate" hidden>
+      <div class="page-heading"><h1>Calibration</h1><span class="hint">Start while DISARMED</span></div>
+      <div class="calibration-layout">
+        <section class="panel calibration-workflow" aria-labelledby="workflow-heading">
+          <div class="section-title"><h2 id="workflow-heading">Active workflow</h2></div>
+          <dl>
+            <div><dt>Calibration</dt><dd id="cal-kind">none</dd></div>
+            <div><dt>Step</dt><dd id="cal-step">--</dd></div>
+            <div><dt>Captured PWM</dt><dd id="cal-values">--</dd></div>
+          </dl>
+          <p id="cal-prompt" class="calibration-prompt">Select a calibration.</p>
+          <div class="calibration-actions">
+            <button id="cal-capture" data-cal-command="cal capture" type="button" disabled>Capture position</button>
+            <button id="cal-cancel" class="danger" data-cal-command="cal cancel" type="button" disabled>Cancel / safe outputs</button>
+          </div>
+          <p id="cal-message" class="message" role="status"></p>
+        </section>
+
+        <section class="panel" aria-labelledby="receiver-cal-heading">
+          <div class="section-title"><h2 id="receiver-cal-heading">Receiver inputs</h2></div>
+          <div class="calibration-buttons">
+            <button data-cal-start data-cal-command="cal receiver" type="button">CH2 Throttle</button>
+            <button data-cal-start data-cal-command="cal steering" type="button">CH1 Steering</button>
+            <button data-cal-start data-cal-command="cal arm" type="button">CH4 RUN/STOP</button>
+          </div>
+          <p class="hint">Hold each requested position, then capture. Saves after all three captures pass validation.</p>
+        </section>
+
+        <section class="panel esc-calibration-panel" aria-labelledby="esc-cal-heading">
+          <div class="section-title"><h2 id="esc-cal-heading">ESC calibration / relay</h2><span class="warning">All four motors</span></div>
+          <p class="hint warning">Lift and restrain the car. Keep CH4 at STOP and traction-power isolation within reach. Start endpoint calibration with traction power disconnected.</p>
+          <div class="calibration-buttons esc-buttons">
+            <button id="cal-esc-arm" data-cal-start data-cal-command="cal esc arm" type="button">Arm calibration</button>
+            <button id="cal-esc-max" data-cal-command="cal esc max" type="button" disabled>Output maximum</button>
+            <button id="cal-esc-min" data-cal-command="cal esc min" type="button" disabled>Output minimum</button>
+            <button id="cal-manual" class="danger" data-cal-start data-cal-command="cal manual" type="button">Manual throttle relay</button>
+          </div>
+          <p class="hint">Relay follows receiver throttle for up to 30 s. Reverse outputs stay low.</p>
+        </section>
+      </div>
+    </div>
+
+    <div data-page="settings" hidden>
+      <div class="page-heading settings-heading">
+        <h1>Settings</h1>
+        <div class="config-heading-actions">
+          <button id="disarm-for-config" class="danger" type="button" disabled>Disarm for config</button>
+          <button id="reload-config" type="button">Reload saved</button>
+        </div>
+      </div>
+      <div class="config-status"><span id="config-source">Source --</span><span id="config-lock" class="warning">Locked · no telemetry</span></div>
+      <p id="message" class="message" role="status"></p>
+      <div class="settings-layout">
+        <div class="settings-column">
+          <section class="panel config-group" aria-labelledby="drive-settings-heading">
+            <div class="section-title"><h2 id="drive-settings-heading">Drive & receiver</h2></div>
+            <div class="config-grid">
+              <form class="setting-row" data-builder="drivetrain">
+                <label>Drivetrain<select name="value"><option value="awd">AWD</option><option value="fwd">FWD</option><option value="rwd">RWD</option></select></label>
+                <div class="button-row"><button>Save</button><button id="cycle-drivetrain" type="button">Cycle</button></div>
+              </form>
+              <form class="setting-row" data-builder="arm-latch">
+                <label>Arm latch<select name="value"><option value="on">On · until power loss</option><option value="off">Off · STOP disarms</option></select></label><button>Save</button>
+              </form>
+              <form class="setting-row" data-builder="reverse"><label>Reverse limit (%)<input name="value" type="number" min="0" max="100"></label><button>Save</button></form>
+              <form class="setting-row" data-builder="drive-smoothing"><label><span>Drive smoothing (%)<small>0 off · 100 smoothest</small></span><input name="value" type="number" min="0" max="100" step="1"></label><button>Save</button></form>
+              <form class="setting-row failsafe-row" data-builder="failsafe">
+                <div class="failsafe-fields">
+                  <label>Failsafe pulse (µs)<input name="pulse" type="number" min="800" max="2200"></label>
+                  <label>± window (µs)<input name="window" type="number" min="1" max="100"></label>
+                </div>
+                <div class="button-row"><button>Save</button><button type="button" data-command="config failsafe off">Disable</button></div>
+              </form>
+            </div>
+          </section>
+
+          <section class="panel config-group" aria-labelledby="rpm-settings-heading">
+            <div class="section-title"><h2 id="rpm-settings-heading">Rear RPM conversion</h2></div>
+            <div class="config-grid">
+              <form class="setting-row" data-builder="ppr"><label>Pulses/revolution<input name="value" type="number" min="1" max="120"></label><button>Save</button></form>
+              <form class="setting-row" data-builder="poles"><label>Motor poles (legacy)<input name="value" type="number" min="2" max="60" step="2"></label><button>Save</button></form>
+            </div>
+          </section>
+
+          <section class="panel config-group" aria-labelledby="steering-input-heading">
+            <div class="section-title"><h2 id="steering-input-heading">Steering input</h2><span>CH1 · µs</span></div>
+            <p class="hint">Center must sit ≥150 µs between endpoints; deadband must be smaller than each span. Or use Calibrate → CH1 Steering.</p>
+            <form class="parameter-form" data-builder="steering-input">
+              <div class="parameter-fields">
+                <label>Full left<input name="left" type="number" min="800" max="2200" required></label>
+                <label>Center<input name="center" type="number" min="800" max="2200" required></label>
+                <label>Full right<input name="right" type="number" min="800" max="2200" required></label>
+                <label>Deadband (±µs)<input name="deadband" type="number" min="0" max="150" required></label>
+              </div>
+              <div class="form-actions"><button>Save CH1 input</button></div>
+            </form>
+            <form class="setting-row" data-builder="smoothing"><label>Input smoothing (ms)<input name="value" type="number" min="0" max="500" required></label><button>Save</button></form>
+          </section>
+        </div>
+
+        <div class="settings-column">
+        <section class="panel config-group" aria-labelledby="geometry-heading">
+          <div class="section-title"><h2 id="geometry-heading">Vehicle geometry</h2></div>
+          <form class="parameter-form" data-builder="geometry">
+            <div class="parameter-fields geometry-dimensions">
+              <label>Wheelbase (mm)<input name="wheelbase" type="number" min="50" max="2000" step="0.1" required></label>
+              <label>Front track (mm)<input name="track" type="number" min="50" max="2000" step="0.1" required></label>
+              <label>Wheel dia. (mm)<input name="diameter" type="number" min="10" max="500" step="0.1" required></label>
+            </div>
+            <div class="parameter-fields">
+              <label>Max left (°)<input name="max_left" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Max right (°)<input name="max_right" type="number" min="1" max="85" step="0.1" required></label>
+            </div>
+            <div class="form-actions"><button>Save geometry</button></div>
+          </form>
+          <p class="hint">Steering limits must fit both servos' calibrated angles. Lower limits before reducing endpoint angles. Wheel diameter also sets the rear-speed conversion.</p>
+        </section>
+
+        <section class="panel config-group" aria-labelledby="servo-settings-heading">
+          <div class="section-title"><h2 id="servo-settings-heading">Servo calibration</h2><span>PWM & wheel angle</span></div>
+          <p class="hint">PWM: 800–2200 µs; endpoints ≥50 µs either side of center. Swap left/right PWM to reverse a servo.</p>
+          <p class="hint">Angles: positive measured wheel travel at each endpoint (1–85°). Default 30° values need measurement.</p>
+          <p class="hint warning">Check travel with traction power disconnected.</p>
+          <form class="servo-form" data-builder="servo-left">
+            <div class="servo-heading"><h3>Left servo <span>GPIO32</span></h3><button>Save left</button></div>
+            <div class="servo-fields">
+              <label>Left (µs)<input name="left" type="number" min="800" max="2200" required></label>
+              <label>Center (µs)<input name="center" type="number" min="800" max="2200" required></label>
+              <label>Right (µs)<input name="right" type="number" min="800" max="2200" required></label>
+            </div>
+            <div class="parameter-fields">
+              <label>Left angle (°)<input name="left_angle" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Right angle (°)<input name="right_angle" type="number" min="1" max="85" step="0.1" required></label>
+            </div>
+          </form>
+          <form class="servo-form" data-builder="servo-right">
+            <div class="servo-heading"><h3>Right servo <span>GPIO26</span></h3><button>Save right</button></div>
+            <div class="servo-fields">
+              <label>Left (µs)<input name="left" type="number" min="800" max="2200" required></label>
+              <label>Center (µs)<input name="center" type="number" min="800" max="2200" required></label>
+              <label>Right (µs)<input name="right" type="number" min="800" max="2200" required></label>
+            </div>
+            <div class="parameter-fields">
+              <label>Left angle (°)<input name="left_angle" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Right angle (°)<input name="right_angle" type="number" min="1" max="85" step="0.1" required></label>
+            </div>
+          </form>
+        </section>
+        </div>
+
+        <section class="panel config-group curve-group" aria-labelledby="curve-heading">
+          <div class="section-title"><h2 id="curve-heading">Ackermann strength versus speed</h2></div>
+          <p class="hint curve-definition"><strong>0% = parallel wheel angles · 100% = ideal Ackermann.</strong> Inside = wheel toward the turn; it follows steering input. Strength blends the outside angle toward the ideal geometry.</p>
+          <form data-builder="ackermann" id="ackermann-form">
+            <div class="ackermann-layout">
+              <div>
+                <div class="table-scroll"><table class="ackermann-points"><thead><tr><th scope="col">Speed (km/h)</th><th scope="col">Strength (%)</th><th scope="col"><span class="sr-only">Remove point</span></th></tr></thead><tbody id="ackermann-points"></tbody></table></div>
+                <div class="button-row"><button id="ackermann-add" type="button">Add point</button><button type="submit">Save curve</button></div>
+                <p class="hint curve-limits">2–8 points · start at 0 · increasing speeds<br>0–300 km/h · 0–100% · 0.1 precision</p>
+              </div>
+              <div><svg id="ackermann-preview" viewBox="0 0 520 260" role="img" aria-label="Draft Ackermann strength against vehicle speed"></svg><p id="ackermann-preview-status" class="hint" role="status"></p></div>
+            </div>
+            <details class="technical-notes"><summary>Interpolation & speed loss</summary><p class="hint">Linear interpolation; final percentage holds above the last speed. Applies in reverse too. Armed RPM loss holds the last valid speed, including a stop with no pulses. Before a valid estimate, or when disarmed with missing RPM, the 0 km/h point applies.</p></details>
+          </form>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

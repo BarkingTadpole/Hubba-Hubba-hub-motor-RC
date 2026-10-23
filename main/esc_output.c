@@ -3,14 +3,10 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "driver/ledc.h"
+#include "pwm_output.h"
 #include "freertos/FreeRTOS.h"
 #include "pin_config.h"
 
-#define SERVO_FRAME_HZ 50
-#define SERVO_FRAME_US 20000
-#define LEDC_DUTY_RES LEDC_TIMER_16_BIT
-#define LEDC_MAX_DUTY ((1U << 16) - 1U)
 
 typedef struct {
     gpio_num_t gpio;
@@ -35,25 +31,13 @@ static esc_limits_t configured_limits;
 static wheel_output_command_t current_output;
 static portMUX_TYPE output_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static uint32_t pulse_us_to_duty(uint16_t pulse_us)
-{
-    return ((uint32_t)pulse_us * LEDC_MAX_DUTY) / SERVO_FRAME_US;
-}
-
 static void set_pin(const pwm_pin_t *pin, uint16_t pulse_us)
 {
-    uint32_t duty = pulse_us_to_duty(pulse_us);
+    uint32_t duty = pwm_pulse_to_duty(pulse_us);
     ESP_ERROR_CHECK(ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE,
                                              pin->channel,
                                              duty,
                                              0));
-}
-
-static uint16_t clamp_to_range(uint16_t pulse_us, uint16_t minimum, uint16_t maximum)
-{
-    if (pulse_us < minimum) return minimum;
-    if (pulse_us > maximum) return maximum;
-    return pulse_us;
 }
 
 static esp_err_t configure_pin(const pwm_pin_t *pin, uint16_t initial_pulse_us)
@@ -64,7 +48,7 @@ static esp_err_t configure_pin(const pwm_pin_t *pin, uint16_t initial_pulse_us)
         .channel = pin->channel,
         .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = LEDC_TIMER_0,
-        .duty = pulse_us_to_duty(initial_pulse_us),
+        .duty = pwm_pulse_to_duty(initial_pulse_us),
         .hpoint = 0,
         .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
         .flags.output_invert = 0,
@@ -84,9 +68,9 @@ esp_err_t esc_output_init(const esc_limits_t *limits)
 
     ledc_timer_config_t timer_config = {
         .speed_mode = LEDC_HIGH_SPEED_MODE,
-        .duty_resolution = LEDC_DUTY_RES,
+        .duty_resolution = PWM_DUTY_RES,
         .timer_num = LEDC_TIMER_0,
-        .freq_hz = SERVO_FRAME_HZ,
+        .freq_hz = PWM_FRAME_HZ,
         .clk_cfg = LEDC_AUTO_CLK,
         .deconfigure = false,
     };
@@ -137,10 +121,10 @@ void esc_output_set_wheels(const wheel_output_command_t *command)
     }
 
     for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
-        uint16_t throttle_us = clamp_to_range(command->throttle_us[i],
+        uint16_t throttle_us = pwm_clamp_pulse(command->throttle_us[i],
                                               configured_limits.throttle_min_us,
                                               configured_limits.throttle_max_us);
-        uint16_t reverse_us = clamp_to_range(command->reverse_us[i],
+        uint16_t reverse_us = pwm_clamp_pulse(command->reverse_us[i],
                                              configured_limits.reverse_low_us,
                                              configured_limits.reverse_high_us);
         if (current_output.throttle_us[i] != throttle_us) {
@@ -170,9 +154,4 @@ void esc_output_get(wheel_output_command_t *command)
         memcpy(command, &current_output, sizeof(*command));
         portEXIT_CRITICAL(&output_lock);
     }
-}
-
-const esc_limits_t *esc_output_limits(void)
-{
-    return &configured_limits;
 }

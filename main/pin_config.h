@@ -13,10 +13,10 @@
 #define PIN_RC_THROTTLE_INPUT GPIO_NUM_25
 #define PIN_RC_STEERING_INPUT GPIO_NUM_16
 #define PIN_RC_ARM_INPUT GPIO_NUM_33
-#define PIN_RC_TV_MODE_INPUT GPIO_NUM_26
 
-/* Steering servo output. Receiver CH1 is routed through the ESP32. */
-#define PIN_STEERING_SERVO_OUTPUT GPIO_NUM_32
+/* Independent steering servo outputs. Receiver CH1 is routed through the ESP32. */
+#define PIN_STEERING_LEFT_OUTPUT GPIO_NUM_32
+#define PIN_STEERING_RIGHT_OUTPUT GPIO_NUM_26
 
 /* Four independent ESC throttle outputs. */
 #define PIN_ESC_FL_THROTTLE GPIO_NUM_13
@@ -35,22 +35,5 @@
 #define PIN_ESC_RR_REVERSE GPIO_NUM_17
 
 /* Hobbywing HW86060041 RPM sensor signal inputs. */
-#define PIN_RPM_FL_INPUT GPIO_NUM_34
-#define PIN_RPM_FR_INPUT GPIO_NUM_35
 #define PIN_RPM_RL_INPUT GPIO_NUM_36
 #define PIN_RPM_RR_INPUT GPIO_NUM_39
-
-/* Adafruit STEMMA QT ISM330DHCX I2C interface and optional interrupts. */
-#define PIN_IMU_I2C_SDA GPIO_NUM_23
-#define PIN_IMU_I2C_SCL GPIO_NUM_22
-#define PIN_IMU_INT1 GPIO_NUM_NC
-#define PIN_IMU_INT2 GPIO_NUM_NC
-
-/*
- * Dragy Lite UART1 routed through the GPIO matrix. GPIO5 is a strapping pin,
- * so the Dragy RX input must not pull it away from its required boot level.
- * Dragy compass SDA/SCL share GPIO23/GPIO22 with the IMU rather than creating
- * duplicate physical pin assignments here.
- */
-#define PIN_DRAGY_UART_RX GPIO_NUM_4
-#define PIN_DRAGY_UART_TX GPIO_NUM_5

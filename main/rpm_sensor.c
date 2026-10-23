@@ -18,17 +18,15 @@ typedef struct {
     int64_t duration_us;
 } rpm_window_sample_t;
 
-static const gpio_num_t rpm_pins[POWERTRAIN_WHEEL_COUNT] = {
-    [WHEEL_FRONT_LEFT] = PIN_RPM_FL_INPUT,
-    [WHEEL_FRONT_RIGHT] = PIN_RPM_FR_INPUT,
-    [WHEEL_REAR_LEFT] = PIN_RPM_RL_INPUT,
-    [WHEEL_REAR_RIGHT] = PIN_RPM_RR_INPUT,
+static const gpio_num_t rpm_pins[REAR_RPM_COUNT] = {
+    [RPM_REAR_LEFT] = PIN_RPM_RL_INPUT,
+    [RPM_REAR_RIGHT] = PIN_RPM_RR_INPUT,
 };
 
-static pcnt_unit_handle_t units[POWERTRAIN_WHEEL_COUNT];
-static pcnt_channel_handle_t channels[POWERTRAIN_WHEEL_COUNT];
-static rpm_window_sample_t sample_windows[POWERTRAIN_WHEEL_COUNT][RPM_MAX_WINDOW_SAMPLES];
-static int64_t last_pulse_at_us[POWERTRAIN_WHEEL_COUNT];
+static pcnt_unit_handle_t units[REAR_RPM_COUNT];
+static pcnt_channel_handle_t channels[REAR_RPM_COUNT];
+static rpm_window_sample_t sample_windows[REAR_RPM_COUNT][RPM_MAX_WINDOW_SAMPLES];
+static int64_t last_pulse_at_us[REAR_RPM_COUNT];
 static int64_t last_update_at_us;
 static size_t window_index;
 static uint16_t configured_pulses_per_revolution = 7;
@@ -49,7 +47,7 @@ esp_err_t rpm_sensor_init(uint16_t pulses_per_revolution)
 
     configured_pulses_per_revolution = pulses_per_revolution;
 
-    for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
+    for (size_t i = 0; i < REAR_RPM_COUNT; i++) {
         pcnt_unit_config_t unit_config = {
             .low_limit = -1,
             .high_limit = 32767,
@@ -115,14 +113,6 @@ void rpm_sensor_set_pulses_per_revolution(uint16_t pulses_per_revolution)
     portEXIT_CRITICAL(&state_lock);
 }
 
-uint16_t rpm_sensor_pulses_per_revolution(void)
-{
-    portENTER_CRITICAL(&state_lock);
-    uint16_t pulses_per_revolution = configured_pulses_per_revolution;
-    portEXIT_CRITICAL(&state_lock);
-    return pulses_per_revolution;
-}
-
 void rpm_sensor_update(void)
 {
     int64_t now_us = esp_timer_get_time();
@@ -132,15 +122,15 @@ void rpm_sensor_update(void)
     }
     last_update_at_us = now_us;
 
-    float rpm_values[POWERTRAIN_WHEEL_COUNT] = {0};
-    float frequency_values[POWERTRAIN_WHEEL_COUNT] = {0};
-    uint32_t edge_counts[POWERTRAIN_WHEEL_COUNT] = {0};
-    uint32_t window_durations_us[POWERTRAIN_WHEEL_COUNT] = {0};
-    bool valid_values[POWERTRAIN_WHEEL_COUNT] = {false};
+    float rpm_values[REAR_RPM_COUNT] = {0};
+    float frequency_values[REAR_RPM_COUNT] = {0};
+    uint32_t edge_counts[REAR_RPM_COUNT] = {0};
+    uint32_t window_durations_us[REAR_RPM_COUNT] = {0};
+    bool valid_values[REAR_RPM_COUNT] = {false};
 
-    int counts[POWERTRAIN_WHEEL_COUNT] = {0};
-    bool count_valid[POWERTRAIN_WHEEL_COUNT] = {false};
-    for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
+    int counts[REAR_RPM_COUNT] = {0};
+    bool count_valid[REAR_RPM_COUNT] = {false};
+    for (size_t i = 0; i < REAR_RPM_COUNT; i++) {
         if (pcnt_unit_get_count(units[i], &counts[i]) != ESP_OK) {
             continue;
         }
@@ -152,7 +142,7 @@ void rpm_sensor_update(void)
 
     portENTER_CRITICAL(&state_lock);
     uint16_t pulses_per_revolution = configured_pulses_per_revolution;
-    for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
+    for (size_t i = 0; i < REAR_RPM_COUNT; i++) {
         if (!count_valid[i]) {
             continue;
         }
@@ -195,7 +185,7 @@ void rpm_sensor_update(void)
     portEXIT_CRITICAL(&state_lock);
 
     portENTER_CRITICAL(&snapshot_lock);
-    for (size_t i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
+    for (size_t i = 0; i < REAR_RPM_COUNT; i++) {
         current_snapshot.rpm[i] = rpm_values[i];
         current_snapshot.frequency_hz[i] = frequency_values[i];
         current_snapshot.edge_count[i] = edge_counts[i];

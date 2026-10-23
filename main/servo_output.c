@@ -1,98 +1,72 @@
 #include "servo_output.h"
 
-#include "driver/ledc.h"
+#include <stddef.h>
+
+#include "pwm_output.h"
 #include "freertos/FreeRTOS.h"
 #include "pin_config.h"
 
-#define SERVO_FRAME_HZ 50
-#define SERVO_FRAME_US 20000
 #define SERVO_PULSE_MIN_US 800
 #define SERVO_PULSE_MAX_US 2200
-#define SERVO_DUTY_RES LEDC_TIMER_16_BIT
-#define SERVO_MAX_DUTY ((1U << 16) - 1U)
 
-static uint16_t neutral_pulse_us;
-static uint16_t current_pulse_us;
+static uint16_t current_pulse_us[STEERING_SERVO_COUNT];
+static const gpio_num_t servo_pins[STEERING_SERVO_COUNT] = {
+    PIN_STEERING_LEFT_OUTPUT, PIN_STEERING_RIGHT_OUTPUT,
+};
 static portMUX_TYPE output_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static uint16_t clamp_pulse(uint16_t pulse_us)
+esp_err_t servo_output_init(const uint16_t centers[STEERING_SERVO_COUNT])
 {
-    if (pulse_us < SERVO_PULSE_MIN_US) {
-        return SERVO_PULSE_MIN_US;
+    for (size_t i = 0; i < STEERING_SERVO_COUNT; i++) {
+        if (centers[i] < SERVO_PULSE_MIN_US || centers[i] > SERVO_PULSE_MAX_US) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        current_pulse_us[i] = centers[i];
     }
-    if (pulse_us > SERVO_PULSE_MAX_US) {
-        return SERVO_PULSE_MAX_US;
-    }
-    return pulse_us;
-}
-
-static uint32_t pulse_us_to_duty(uint16_t pulse_us)
-{
-    return ((uint32_t)pulse_us * SERVO_MAX_DUTY) / SERVO_FRAME_US;
-}
-
-esp_err_t servo_output_init(uint16_t center_us)
-{
-    if (center_us < SERVO_PULSE_MIN_US || center_us > SERVO_PULSE_MAX_US) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    neutral_pulse_us = center_us;
-    current_pulse_us = center_us;
-
     ledc_timer_config_t timer_config = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = SERVO_DUTY_RES,
+        .duty_resolution = PWM_DUTY_RES,
         .timer_num = LEDC_TIMER_0,
-        .freq_hz = SERVO_FRAME_HZ,
+        .freq_hz = PWM_FRAME_HZ,
         .clk_cfg = LEDC_AUTO_CLK,
-        .deconfigure = false,
     };
     esp_err_t err = ledc_timer_config(&timer_config);
-    if (err != ESP_OK) {
-        return err;
+    if (err != ESP_OK) return err;
+    for (size_t i = 0; i < STEERING_SERVO_COUNT; i++) {
+        ledc_channel_config_t channel_config = {
+            .gpio_num = servo_pins[i],
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .channel = (ledc_channel_t)i,
+            .intr_type = LEDC_INTR_DISABLE,
+            .timer_sel = LEDC_TIMER_0,
+            .duty = pwm_pulse_to_duty(centers[i]),
+            .hpoint = 0,
+            .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
+        };
+        err = ledc_channel_config(&channel_config);
+        if (err != ESP_OK) return err;
     }
-
-    ledc_channel_config_t channel_config = {
-        .gpio_num = PIN_STEERING_SERVO_OUTPUT,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CHANNEL_0,
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = LEDC_TIMER_0,
-        .duty = pulse_us_to_duty(center_us),
-        .hpoint = 0,
-        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
-        .flags.output_invert = 0,
-        .deconfigure = false,
-    };
-    return ledc_channel_config(&channel_config);
+    return ESP_OK;
 }
 
-void servo_output_set_pulse(uint16_t pulse_us)
+void servo_output_set_pulses(const uint16_t pulses[STEERING_SERVO_COUNT])
 {
-    uint16_t clamped_pulse_us = clamp_pulse(pulse_us);
-    if (clamped_pulse_us == current_pulse_us) {
-        return;
+    for (size_t i = 0; i < STEERING_SERVO_COUNT; i++) {
+        uint16_t pulse = pwm_clamp_pulse(pulses[i], SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
+        if (pulse == current_pulse_us[i]) continue;
+        /* ESC initialization installs the LEDC fade service before this API. */
+        ESP_ERROR_CHECK(ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,
+                                                (ledc_channel_t)i,
+                                                pwm_pulse_to_duty(pulse), 0));
+        portENTER_CRITICAL(&output_lock);
+        current_pulse_us[i] = pulse;
+        portEXIT_CRITICAL(&output_lock);
     }
-
-    ESP_ERROR_CHECK(ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,
-                                             LEDC_CHANNEL_0,
-                                             pulse_us_to_duty(clamped_pulse_us),
-                                             0));
-    portENTER_CRITICAL(&output_lock);
-    current_pulse_us = clamped_pulse_us;
-    portEXIT_CRITICAL(&output_lock);
 }
 
-void servo_output_set_neutral(void)
-{
-    servo_output_set_pulse(neutral_pulse_us);
-}
-
-uint16_t servo_output_get_pulse(void)
+void servo_output_get_pulses(uint16_t pulses[STEERING_SERVO_COUNT])
 {
     portENTER_CRITICAL(&output_lock);
-    uint16_t pulse_us = current_pulse_us;
+    for (size_t i = 0; i < STEERING_SERVO_COUNT; i++) pulses[i] = current_pulse_us[i];
     portEXIT_CRITICAL(&output_lock);
-    return pulse_us;
 }
