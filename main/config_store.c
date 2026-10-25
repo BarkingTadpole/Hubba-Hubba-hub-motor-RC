@@ -1,5 +1,7 @@
 #include "config_store.h"
 
+#include <stddef.h>
+
 #include "calibration_validation.h"
 
 #include "default_config.h"
@@ -159,6 +161,7 @@ void config_store_load_drive(drive_config_t *config)
     *config = (drive_config_t){
         .drivetrain_mode = DRIVETRAIN_AWD,
         .reverse_limit_percent = DEFAULT_REVERSE_LIMIT_PERCENT,
+        .tank_limit_percent = DEFAULT_TANK_LIMIT_PERCENT,
         .drive_smoothing_percent = DEFAULT_DRIVE_SMOOTHING_PERCENT,
         .receiver_failsafe_enabled = DEFAULT_RC_THROTTLE_FAILSAFE_ENABLED != 0,
         .receiver_failsafe_us = DEFAULT_RC_THROTTLE_FAILSAFE_US,
@@ -179,11 +182,14 @@ void config_store_load_drive(drive_config_t *config)
     uint8_t u8 = 0;
     uint16_t u16 = 0;
 
-    if (nvs_get_u8(nvs, "drive_mode", &u8) == ESP_OK && u8 <= DRIVETRAIN_RWD) {
+    if (nvs_get_u8(nvs, "drive_mode", &u8) == ESP_OK && u8 <= DRIVETRAIN_TANK) {
         config->drivetrain_mode = (drivetrain_mode_t)u8; found = true;
     }
     if (nvs_get_u8(nvs, "rev_limit", &u8) == ESP_OK && u8 <= 100) {
         config->reverse_limit_percent = u8; found = true;
+    }
+    if (nvs_get_u8(nvs, "tank_limit", &u8) == ESP_OK && u8 <= 100) {
+        config->tank_limit_percent = u8; found = true;
     }
     if (nvs_get_u8(nvs, "drive_smooth", &u8) == ESP_OK && u8 <= 100) {
         config->drive_smoothing_percent = u8; found = true;
@@ -214,7 +220,58 @@ void config_store_load_drive(drive_config_t *config)
     }
     independent_steering_config_t steering = {0};
     size_t steering_size = sizeof(steering);
-    esp_err_t steering_err = nvs_get_blob(nvs, "dual_steer_v2", &steering, &steering_size);
+    esp_err_t steering_err = nvs_get_blob(nvs, "dual_steer_v6", &steering, &steering_size);
+    if (steering_err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Older endpoint angles are unmeasured; never invent measured points. */
+        steering = config->steering;
+        steering_size = offsetof(independent_steering_config_t, wheel_calibration);
+        steering_err = nvs_get_blob(nvs, "dual_steer_v5", &steering, &steering_size);
+        if (steering_err == ESP_OK && steering_size == offsetof(independent_steering_config_t, wheel_calibration) &&
+            steering.version == 5) {
+            steering.version = INDEPENDENT_STEERING_VERSION;
+            steering_size = sizeof(steering);
+        } else if (steering_err == ESP_OK) steering_err = ESP_ERR_INVALID_ARG;
+    }
+    if (steering_err == ESP_ERR_NVS_NOT_FOUND) {
+        /* V4 retains calibration, trims and linkage limits; append zero toe. */
+        steering = config->steering;
+        steering_size = offsetof(independent_steering_config_t, toe_tenths_deg);
+        steering_err = nvs_get_blob(nvs, "dual_steer_v4", &steering, &steering_size);
+        if (steering_err == ESP_OK && steering_size == offsetof(independent_steering_config_t, toe_tenths_deg) &&
+            steering.version == 4) {
+            steering.version = INDEPENDENT_STEERING_VERSION;
+            steering_size = sizeof(steering);
+        } else if (steering_err == ESP_OK) {
+            steering_err = ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (steering_err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Preserve v3 trims/calibration; append default linkage limits.
+         * Migration is read-only. A present but invalid blob never falls back. */
+        steering = config->steering;
+        steering_size = offsetof(independent_steering_config_t, linkage);
+        steering_err = nvs_get_blob(nvs, "dual_steer_v3", &steering, &steering_size);
+        if (steering_err == ESP_OK && steering_size == offsetof(independent_steering_config_t, linkage) &&
+            steering.version == 3) {
+            steering.version = INDEPENDENT_STEERING_VERSION;
+            steering_size = sizeof(steering);
+        } else if (steering_err == ESP_OK) {
+            steering_err = ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (steering_err == ESP_ERR_NVS_NOT_FOUND) {
+        /* V2 has neither trims nor linkage limits. */
+        steering = config->steering;
+        steering_size = offsetof(independent_steering_config_t, trim_us);
+        steering_err = nvs_get_blob(nvs, "dual_steer_v2", &steering, &steering_size);
+        if (steering_err == ESP_OK && steering_size == offsetof(independent_steering_config_t, trim_us) &&
+            steering.version == 2) {
+            steering.version = INDEPENDENT_STEERING_VERSION;
+            steering_size = sizeof(steering);
+        } else if (steering_err == ESP_OK) {
+            steering_err = ESP_ERR_INVALID_ARG;
+        }
+    }
     if (steering_err == ESP_OK &&
         steering_size == sizeof(steering) && independent_steering_config_valid(&steering)) {
         config->steering = steering;
@@ -244,13 +301,16 @@ void config_store_load_drive(drive_config_t *config)
 
 esp_err_t config_store_save_drive(const drive_config_t *config)
 {
-    if (!independent_steering_config_valid(&config->steering)) return ESP_ERR_INVALID_ARG;
+    if (config == NULL || config->drivetrain_mode < DRIVETRAIN_AWD ||
+        config->drivetrain_mode > DRIVETRAIN_TANK || config->tank_limit_percent > 100 ||
+        !independent_steering_config_valid(&config->steering)) return ESP_ERR_INVALID_ARG;
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("cfg", NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
 
     err = nvs_set_u8(nvs, "drive_mode", (uint8_t)config->drivetrain_mode);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "rev_limit", config->reverse_limit_percent);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "tank_limit", config->tank_limit_percent);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "drive_smooth", config->drive_smoothing_percent);
     if (err == ESP_OK) err = nvs_set_u8(nvs, "fs_en", config->receiver_failsafe_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "fs_us", config->receiver_failsafe_us);
@@ -258,7 +318,7 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     if (err == ESP_OK) err = nvs_set_u8(nvs, "mtr_poles", config->motor_poles);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "rpm_ppr", config->rpm_pulses_per_revolution);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "st_smooth", config->steering_smoothing_ms);
-    if (err == ESP_OK) err = nvs_set_blob(nvs, "dual_steer_v2", &config->steering, sizeof(config->steering));
+    if (err == ESP_OK) err = nvs_set_blob(nvs, "dual_steer_v6", &config->steering, sizeof(config->steering));
     if (err == ESP_OK) err = nvs_set_u8(nvs, "arm_latch", config->permanent_arm_latch_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);

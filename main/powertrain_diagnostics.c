@@ -32,6 +32,13 @@ void powertrain_print_status(void)
            snapshot.arm_cycle_ready ? "ready" : "required", (unsigned long)snapshot.drive_inhibit_flags);
     printf("  arm latch=%s; inhibit events=%lu\n", snapshot.config.permanent_arm_latch_enabled ? "on" : "off",
            (unsigned long)snapshot.drive_inhibit_count);
+    printf("  reverse limit=%u%%; tank throttle limit=%u%%; toe=%+.1f deg per wheel (+in/-out)\n",
+           snapshot.config.reverse_limit_percent, snapshot.config.tank_limit_percent,
+           snapshot.config.steering.toe_tenths_deg / 10.0);
+    if (snapshot.config.drivetrain_mode == DRIVETRAIN_TANK) {
+        printf("  TANK: CH1 selects spin; either CH2 direction supplies power; front wheels hold toe\n");
+        printf("    rear speed is wheel surface speed, not vehicle translation; Ackermann bypassed\n");
+    }
     printf("  throttle full/neutral/reverse=%u/%u/%u us (%s)\n",
            throttle.full_throttle_us, throttle.neutral_us, throttle.full_reverse_us,
            throttle.loaded_from_nvs ? "nvs" : "defaults; calibration required");
@@ -49,11 +56,20 @@ void powertrain_print_status(void)
         printf("  %s servo: left/center/right=%u/%u/%u us, output=%u us\n",
                i == STEERING_LEFT ? "left" : "right", servo->left_us, servo->center_us,
                servo->right_us, snapshot.steering_servo_us[i]);
+        printf("    trim=%+d us, neutral=%d us (endpoints fixed)\n",
+               (int)snapshot.config.steering.trim_us[i],
+               (int)servo->center_us + snapshot.config.steering.trim_us[i]);
         printf("    endpoint angles left/right=%.1f/%.1f deg; model target=%+.2f deg (not measured)\n",
                servo->left_tenths_deg / 10.0, servo->right_tenths_deg / 10.0,
                (double)snapshot.steering_angle_deg[i]);
+        printf("    wheel angle calibration: %u measured points%s\n",
+               snapshot.config.steering.wheel_calibration[i].count,
+               snapshot.config.steering.wheel_calibration[i].count ? "" : " (UNMEASURED endpoint approximation)");
     }
     const steering_geometry_t *g = &snapshot.config.steering.geometry;
+    const steering_linkage_limits_t *linkage = &snapshot.config.steering.linkage;
+    printf("  linkage shaft travel from trimmed neutral: inside=%.1f outside=%.1f deg\n",
+           linkage->inside_tenths_deg / 10.0, linkage->outside_tenths_deg / 10.0);
     printf("  geometry: wheelbase=%.1f track=%.1f wheel diameter=%.1f mm; requested left/right=%.1f/%.1f deg\n",
            g->wheelbase_tenths_mm / 10.0, g->track_tenths_mm / 10.0,
            g->wheel_diameter_tenths_mm / 10.0, g->max_left_tenths_deg / 10.0, g->max_right_tenths_deg / 10.0);
@@ -182,8 +198,10 @@ void powertrain_print_help(void)
     printf("  cal receiver | cal steering | cal arm\n");
     printf("  cal esc arm | cal esc max | cal esc min | cal manual | cal cancel\n");
     printf("  monitor throttle | steering | arm | rpm\n");
-    printf("  config drivetrain <awd|fwd|rwd>\n");
+    printf("  config drivetrain <awd|fwd|rwd|tank>\n");
     printf("  config reverse <0-100>\n");
+    printf("  config tank limit <0-100> (tank only, default 25%%; independent of reverse limit)\n");
+    printf("    tank: CH1 direction, either CH2 direction power; center both to arm\n");
     printf("  config drive smoothing <0-100> (0=off, 100=smoothest)\n");
     printf("  config failsafe off | <pulse_us> <window_us>\n");
     printf("  config rpm poles <even 2-60>\n");
@@ -191,6 +209,14 @@ void powertrain_print_help(void)
     printf("  config steering smoothing <0-500>\n");
     printf("  config steering input <left_us> <center_us> <right_us> <deadband_us>\n");
     printf("  config steering servo <left|right> <left_us> <center_us> <right_us> <left_deg> <right_deg>\n");
+    printf("    servo PWM 500-2500 us at 50 Hz; 180 deg shaft travel is not road-wheel angle\n");
+    printf("    stated mounts: both servos CCW/higher PWM for left, CW/lower PWM for right\n");
+    printf("  config steering trim <left|right> <signed_us> (neutral offset; >=50 us inside endpoints)\n");
+    printf("  config steering toe <signed_degrees> (per wheel, +in/-out, one decimal; calibrated/linkage range)\n");
+    printf("  cal wheel <left|right> | cal capture | cal cancel (physical CH1 measurement, saved CH4 STOP, CH2 neutral, toe 0)\n");
+    printf("  config steering wheel <left|right> <max_left_deg> <max_right_deg> <pwm:signed_wheel_deg>... (3-9 points)\n");
+    printf("  config steering wheel <left|right> clear (retain endpoint approximation, mark unmeasured)\n");
+    printf("  config steering linkage <inside_deg> <outside_deg> (shaft travel from trimmed neutral, 0-90, one decimal)\n");
     printf("  config steering geometry <wheelbase_mm> <track_mm> <wheel_diameter_mm> <max_left_deg> <max_right_deg>\n");
     printf("  config steering ackermann-strength <km/h:strength> ... (2-8 points, first speed 0, strength 0-100%%)\n");
     printf("  config arm-latch <on|off>\n");

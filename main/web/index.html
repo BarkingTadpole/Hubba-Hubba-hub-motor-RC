@@ -28,7 +28,7 @@
       <div class="page-heading"><h1>Telemetry</h1><span class="refresh-note">Poll 250 ms</span></div>
       <section class="status-strip" aria-label="Drive status">
         <div class="metric speed-metric">
-          <span>Rear speed</span><strong><span id="speed">--</span> <small>km/h</small></strong>
+          <span id="speed-label">Rear speed</span><strong><span id="speed">--</span> <small>km/h</small></strong>
           <small id="speed-state">Unavailable</small>
         </div>
         <div class="metric">
@@ -55,7 +55,7 @@
             <tr><th scope="row">Left</th><td>32</td><td id="servo-left-us">--</td><td id="servo-left-angle">--</td></tr>
             <tr><th scope="row">Right</th><td>26</td><td id="servo-right-us">--</td><td id="servo-right-angle">--</td></tr>
           </tbody></table>
-          <p class="hint target-note">Angle targets: + right; not measured.</p>
+          <p id="steering-target-note" class="hint target-note">Angle targets include toe: + right; not measured.</p>
           <dl class="steering-readings">
             <div><dt>Command (+ right)</dt><dd id="steering-command">--</dd></div>
             <div><dt>Ackermann strength</dt><dd id="ackermann-live">--</dd></div>
@@ -113,6 +113,38 @@
           <p class="hint">Hold each requested position, then capture. Saves after all three captures pass validation.</p>
         </section>
 
+        <section class="panel wheel-calibration-panel" aria-labelledby="wheel-cal-heading">
+          <div class="section-title"><h2 id="wheel-cal-heading">Wheel angle calibration</h2></div>
+          <p id="wheel-cal-status" class="hint warning">Left: uncalibrated · Right: uncalibrated</p>
+          <ol class="wheel-cal-instructions">
+            <li>Disconnect traction power; power the servos. Set toe to 0°, center CH1/CH2, and keep calibrated CH4 at STOP. Adjust each servo trim until its wheel points straight ahead.</li>
+            <li>Select a wheel and start measurement mode. CH1 moves that wheel within its saved PWM/linkage limits; the other stays at trimmed neutral. Hold each position still, capture its PWM, then enter the measured road-wheel angle.</li>
+            <li>Record straight ahead (0°), left (negative) and right (positive). Add intermediate measurements for nonlinear linkage motion, up to 9 points. Finish measurement mode, review the changes, then save. Repeat for the other wheel.</li>
+          </ol>
+          <p class="hint">PWM is the commanded servo position. Measure the wheel relative to the vehicle’s straight-ahead direction, not the servo horn. Captures do not measure angles. Mode ends on receiver loss, CH4 leaving STOP, throttle movement or 120 seconds without a capture.</p>
+          <form id="wheel-cal-form">
+            <div class="wheel-cal-controls">
+              <label>Wheel<select id="wheel-cal-side"><option value="left">Left front</option><option value="right">Right front</option></select></label>
+              <button id="wheel-cal-start" type="button" data-cal-start data-cal-command="cal wheel left">Start measurement</button>
+              <button id="wheel-cal-capture" type="button" data-cal-command="cal capture" disabled>Capture PWM</button>
+              <button id="wheel-cal-finish" type="button" data-cal-command="cal cancel" disabled>Finish measurement</button>
+            </div>
+            <p id="wheel-cal-live" class="hint">No live servo position</p>
+            <table class="wheel-cal-points"><thead><tr><th scope="col">Servo PWM (µs)</th><th scope="col">Wheel angle (°)</th><th scope="col">Remove</th></tr></thead><tbody id="wheel-cal-points"></tbody></table>
+            <div class="wheel-cal-controls">
+              <button id="wheel-cal-add" type="button">Add manual point</button>
+              <button id="wheel-cal-load" type="button">Load saved points</button>
+            </div>
+            <p id="wheel-cal-preview" class="hint" role="status"></p>
+            <div class="wheel-cal-controls">
+              <button id="wheel-cal-save">Save measured calibration</button>
+              <button id="wheel-cal-clear" type="button">Clear saved measurements</button>
+            </div>
+          </form>
+          <p id="wheel-cal-message" class="message" role="status"></p>
+          <p class="hint">Save uses straight segments between measured points and sets this wheel’s endpoints to the outer measurements. Requested turn limits may reduce to fit; the preview shows them before saving. Finish before saving. Drafts survive polling and navigation. Clear saved measurements before changing that wheel’s trim or endpoint calibration.</p>
+        </section>
+
         <section class="panel esc-calibration-panel" aria-labelledby="esc-cal-heading">
           <div class="section-title"><h2 id="esc-cal-heading">ESC calibration / relay</h2><span class="warning">All four motors</span></div>
           <p class="hint warning">Lift and restrain the car. Keep CH4 at STOP and traction-power isolation within reach. Start endpoint calibration with traction power disconnected.</p>
@@ -143,7 +175,7 @@
             <div class="section-title"><h2 id="drive-settings-heading">Drive & receiver</h2></div>
             <div class="config-grid">
               <form class="setting-row" data-builder="drivetrain">
-                <label>Drivetrain<select name="value"><option value="awd">AWD</option><option value="fwd">FWD</option><option value="rwd">RWD</option></select></label>
+                <label>Drivetrain<select name="value"><option value="awd">AWD</option><option value="fwd">FWD</option><option value="rwd">RWD</option><option value="tank">Tank · rotate in place</option></select></label>
                 <div class="button-row"><button>Save</button><button id="cycle-drivetrain" type="button">Cycle</button></div>
               </form>
               <form class="setting-row" data-builder="arm-latch">
@@ -159,6 +191,14 @@
                 <div class="button-row"><button>Save</button><button type="button" data-command="config failsafe off">Disable</button></div>
               </form>
             </div>
+          </section>
+
+          <section class="panel config-group" aria-labelledby="tank-settings-heading">
+            <div class="section-title"><h2 id="tank-settings-heading">Tank turning</h2></div>
+            <p class="hint">Select Tank in Drivetrain while disarmed. CH1 selects left or right rotation; either direction of CH2 controls power. Center CH1 or CH2 to stop. Center both before arming.</p>
+            <form class="setting-row" data-builder="tank-limit"><label>Tank speed limit (%)<input name="value" type="number" min="0" max="100" step="1" required></label><button>Save</button></form>
+            <p class="hint">Default 25%. Limits throttle equally on both sides, independently of the reverse limit; 0% disables tank power. This is a throttle cap, not a measured speed target.</p>
+            <p class="hint">Left turn: left motors reverse, right motors forward. Right turn: the opposite. Front wheels hold the configured toe position; Ackermann is bypassed. Both sides stop before reversing.</p>
           </section>
 
           <section class="panel config-group" aria-labelledby="rpm-settings-heading">
@@ -182,6 +222,7 @@
               <div class="form-actions"><button>Save CH1 input</button></div>
             </form>
             <form class="setting-row" data-builder="smoothing"><label>Input smoothing (ms)<input name="value" type="number" min="0" max="500" required></label><button>Save</button></form>
+            <p class="hint">Tank mode keeps the median filter and bypasses steering smoothing so an old spin direction cannot linger.</p>
           </section>
         </div>
 
@@ -203,41 +244,89 @@
           <p class="hint">Steering limits must fit both servos' calibrated angles. Lower limits before reducing endpoint angles. Wheel diameter also sets the rear-speed conversion.</p>
         </section>
 
+        <section class="panel config-group" aria-labelledby="toe-heading">
+          <div class="section-title"><h2 id="toe-heading">Toe alignment</h2></div>
+          <p class="hint">One shared road-wheel angle at centered CH1. Positive = toe-in (fronts toward each other); negative = toe-out. Default 0°.</p>
+          <form class="setting-row" data-builder="toe"><label>Toe per wheel (°)<input name="value" type="number" step="0.1" aria-describedby="toe-range" required></label><button>Save</button></form>
+          <p class="hint" id="toe-range">Available range comes from both wheels’ saved calibration, trims and linkage limits, in 0.1° steps.</p>
+          <p class="hint">Toe is added after steering geometry and counts toward linkage travel. Calibrated endpoints and neutral trims stay fixed. Startup, input loss and tank mode hold this alignment.</p>
+        </section>
+
+        <section class="panel config-group" aria-labelledby="linkage-heading">
+          <div class="section-title"><h2 id="linkage-heading">Safe linkage travel</h2></div>
+          <p class="hint">Maximum servo rotation from trimmed straight-ahead. Defaults: 90° inside and 68° outside. Both values apply to either wheel according to the turn.</p>
+          <form class="parameter-form" data-builder="linkage">
+            <div class="parameter-fields">
+              <label>Inside travel (°)<input name="inside" type="number" min="0" max="90" step="0.1" required></label>
+              <label>Outside travel (°)<input name="outside" type="number" min="0" max="90" step="0.1" required></label>
+            </div>
+            <div class="form-actions"><button>Save linkage limits</button></div>
+          </form>
+          <p class="hint">Inside is the wheel toward the turn: left wheel in a left turn, right wheel in a right turn. The other wheel is outside.</p>
+          <p class="hint">Range 0–90° in 0.1° steps, including toe travel. Tighter calibrated endpoints still apply. Steering components reduce together to preserve their Ackermann blend. Inside travel bounds toe-out; outside travel bounds toe-in. Road-wheel calibration angles remain separate.</p>
+        </section>
+
         <section class="panel config-group" aria-labelledby="servo-settings-heading">
           <div class="section-title"><h2 id="servo-settings-heading">Servo calibration</h2><span>PWM & wheel angle</span></div>
-          <p class="hint">PWM: 800–2200 µs; endpoints ≥50 µs either side of center. Swap left/right PWM to reverse a servo.</p>
-          <p class="hint">Angles: positive measured wheel travel at each endpoint (1–85°). Default 30° values need measurement.</p>
+          <p class="hint">180° positional servo · 500–2500 µs · nominal neutral 1500 µs · output 50 Hz. Endpoints must stay ≥50 µs either side of base center and trimmed neutral.</p>
+          <p class="hint">Neutral = base center + trim. Positive trim increases PWM; endpoints stay fixed. Set trim to 0 to reset.</p>
+          <p class="hint">Angles below are measured road-wheel travel (1–85°), not the servo's 180° shaft range. Default 30° values need measurement; initial PWM travel is 1000–2000 µs.</p>
+          <p class="hint">Use Calibrate → Wheel angle calibration to replace the endpoint approximation with measured points. Saved measurements lock that wheel’s trim and endpoints until cleared.</p>
+          <details class="technical-notes">
+            <summary>180° servo specs & mounting</summary>
+            <p class="hint">Rated input: 50–330 Hz; internal deadband: 2 µs. This is separate from the CH1 receiver deadband. Increasing PWM rotates counterclockwise (CCW); decreasing PWM rotates clockwise (CW).</p>
+            <table aria-label="Servo mounting directions"><thead><tr><th>Turn</th><th>Left servo</th><th>Right servo</th></tr></thead><tbody>
+              <tr><th scope="row">Left</th><td>Inside · CCW</td><td>Outside · CCW</td></tr>
+              <tr><th scope="row">Right</th><td>Outside · CW</td><td>Inside · CW</td></tr>
+            </tbody></table>
+            <p class="hint">For your mounting, both wheel-left PWM endpoints belong above neutral; both wheel-right endpoints below. Saved endpoint order is retained.</p>
+            <table aria-label="Servo electrical ratings"><thead><tr><th>Supply</th><th>s / 60°</th><th>kg·cm</th><th>Stall A</th></tr></thead><tbody>
+              <tr><th scope="row">4.8 V</th><td>0.080</td><td>18</td><td>3.2</td></tr>
+              <tr><th scope="row">6.0 V</th><td>0.065</td><td>22</td><td>4.0</td></tr>
+              <tr><th scope="row">7.4 V</th><td>0.055</td><td>26</td><td>5.2</td></tr>
+              <tr><th scope="row">8.4 V</th><td>0.050</td><td>30</td><td>6.2</td></tr>
+            </tbody></table>
+            <p class="hint">Rated no-load speed and locked-shaft torque/current; idle current 5 mA per servo. Use a 4.8–8.4 V servo supply. Two servos can draw 12.4 A combined at stall at 8.4 V.</p>
+          </details>
           <p class="hint warning">Check travel with traction power disconnected.</p>
           <form class="servo-form" data-builder="servo-left">
             <div class="servo-heading"><h3>Left servo <span>GPIO32</span></h3><button>Save left</button></div>
             <div class="servo-fields">
-              <label>Left (µs)<input name="left" type="number" min="800" max="2200" required></label>
-              <label>Center (µs)<input name="center" type="number" min="800" max="2200" required></label>
-              <label>Right (µs)<input name="right" type="number" min="800" max="2200" required></label>
+              <label>Wheel left (µs)<input name="left" type="number" min="500" max="2500" required></label>
+              <label>Base center (µs)<input name="center" type="number" min="500" max="2500" required></label>
+              <label>Wheel right (µs)<input name="right" type="number" min="500" max="2500" required></label>
             </div>
             <div class="parameter-fields">
-              <label>Left angle (°)<input name="left_angle" type="number" min="1" max="85" step="0.1" required></label>
-              <label>Right angle (°)<input name="right_angle" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Wheel left (°)<input name="left_angle" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Wheel right (°)<input name="right_angle" type="number" min="1" max="85" step="0.1" required></label>
             </div>
+            <p class="hint" id="servo-left-direction"></p>
+          </form>
+          <form class="setting-row" data-builder="trim-left">
+            <label><span>Left trim (µs)<small id="trim-left-neutral">Neutral preview: -- µs</small></span><input name="value" type="number" min="-1900" max="1900" step="1" required></label><button>Save trim</button>
           </form>
           <form class="servo-form" data-builder="servo-right">
             <div class="servo-heading"><h3>Right servo <span>GPIO26</span></h3><button>Save right</button></div>
             <div class="servo-fields">
-              <label>Left (µs)<input name="left" type="number" min="800" max="2200" required></label>
-              <label>Center (µs)<input name="center" type="number" min="800" max="2200" required></label>
-              <label>Right (µs)<input name="right" type="number" min="800" max="2200" required></label>
+              <label>Wheel left (µs)<input name="left" type="number" min="500" max="2500" required></label>
+              <label>Base center (µs)<input name="center" type="number" min="500" max="2500" required></label>
+              <label>Wheel right (µs)<input name="right" type="number" min="500" max="2500" required></label>
             </div>
             <div class="parameter-fields">
-              <label>Left angle (°)<input name="left_angle" type="number" min="1" max="85" step="0.1" required></label>
-              <label>Right angle (°)<input name="right_angle" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Wheel left (°)<input name="left_angle" type="number" min="1" max="85" step="0.1" required></label>
+              <label>Wheel right (°)<input name="right_angle" type="number" min="1" max="85" step="0.1" required></label>
             </div>
+            <p class="hint" id="servo-right-direction"></p>
+          </form>
+          <form class="setting-row" data-builder="trim-right">
+            <label><span>Right trim (µs)<small id="trim-right-neutral">Neutral preview: -- µs</small></span><input name="value" type="number" min="-1900" max="1900" step="1" required></label><button>Save trim</button>
           </form>
         </section>
         </div>
 
         <section class="panel config-group curve-group" aria-labelledby="curve-heading">
           <div class="section-title"><h2 id="curve-heading">Ackermann strength versus speed</h2></div>
-          <p class="hint curve-definition"><strong>0% = parallel wheel angles · 100% = ideal Ackermann.</strong> Inside = wheel toward the turn; it follows steering input. Strength blends the outside angle toward the ideal geometry.</p>
+          <p class="hint curve-definition"><strong>0% = parallel · 100% = ideal Ackermann, before toe.</strong> Inside = wheel toward the turn; it follows steering input within linkage limits. Strength blends the outside angle toward the ideal geometry. Tank mode bypasses this curve.</p>
           <form data-builder="ackermann" id="ackermann-form">
             <div class="ackermann-layout">
               <div>

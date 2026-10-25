@@ -9,6 +9,8 @@ bool powertrain_apply_command(const remote_command_t *command)
         return powertrain_set_drivetrain_mode(command->drivetrain_mode);
     case REMOTE_CONFIG_REVERSE_LIMIT:
         return powertrain_set_reverse_limit((uint8_t)command->unsigned_values[0]);
+    case REMOTE_CONFIG_TANK_LIMIT:
+        return powertrain_set_tank_limit((uint8_t)command->unsigned_values[0]);
     case REMOTE_CONFIG_DRIVE_SMOOTHING:
         return powertrain_set_drive_smoothing(
             (uint8_t)command->unsigned_values[0]);
@@ -27,6 +29,15 @@ bool powertrain_apply_command(const remote_command_t *command)
             (uint16_t)command->unsigned_values[0]);
     case REMOTE_CONFIG_STEERING_SERVO:
         return powertrain_set_steering_servo((uint8_t)command->unsigned_values[0], &command->servo);
+    case REMOTE_CONFIG_WHEEL_CALIBRATION:
+        return powertrain_set_wheel_calibration((uint8_t)command->unsigned_values[0], &command->wheel_calibration,
+                                                command->geometry.max_left_tenths_deg, command->geometry.max_right_tenths_deg);
+    case REMOTE_CONFIG_STEERING_TRIM:
+        return powertrain_set_steering_trim((uint8_t)command->unsigned_values[0], command->steering_trim_us);
+    case REMOTE_CONFIG_STEERING_LINKAGE:
+        return powertrain_set_steering_linkage(&command->linkage);
+    case REMOTE_CONFIG_STEERING_TOE:
+        return powertrain_set_steering_toe(command->toe_tenths_deg);
     case REMOTE_CONFIG_STEERING_GEOMETRY:
         return powertrain_set_steering_geometry(&command->geometry);
     case REMOTE_CONFIG_STEERING_INPUT:
@@ -41,6 +52,10 @@ bool powertrain_apply_command(const remote_command_t *command)
         return powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_STEERING);
     case REMOTE_CALIBRATE_ARM:
         return powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_ARM);
+    case REMOTE_CALIBRATE_WHEEL_LEFT:
+        return powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_WHEEL_LEFT);
+    case REMOTE_CALIBRATE_WHEEL_RIGHT:
+        return powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_WHEEL_RIGHT);
     case REMOTE_CALIBRATE_CAPTURE:
         return powertrain_remote_calibration_capture();
     case REMOTE_CALIBRATE_ESC_ARM:

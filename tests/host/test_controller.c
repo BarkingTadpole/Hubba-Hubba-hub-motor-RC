@@ -82,10 +82,13 @@ void config_store_load_arm(arm_calibration_t *cal)
 { *cal = (arm_calibration_t){.run_us=983,.stop_1_us=2049,.stop_2_us=1515,.loaded_from_nvs=true}; }
 void config_store_load_drive(drive_config_t *config)
 {
-    *config = (drive_config_t){.reverse_limit_percent=100,.drive_smoothing_percent=100,
+    *config = (drive_config_t){.reverse_limit_percent=100,.tank_limit_percent=25,.drive_smoothing_percent=100,
         .receiver_failsafe_enabled=true,.receiver_failsafe_us=1565,.receiver_failsafe_window_us=10,
         .motor_poles=14,.rpm_pulses_per_revolution=7,.permanent_arm_latch_enabled=true};
     independent_steering_defaults(&config->steering);
+    config->steering.trim_us[0] = 25;
+    config->steering.trim_us[1] = -35;
+    config->steering.toe_tenths_deg = 30;
 }
 esp_err_t config_store_save_drive(const drive_config_t *config)
 { (void)config; assert(lock_depth > 0); return save_fails ? ESP_FAIL : ESP_OK; }
@@ -119,6 +122,9 @@ static void frame(uint16_t pulse)
 { inputs[RC_CHANNEL_STEERING].pulse_us = pulse; inputs[RC_CHANNEL_STEERING].valid = true; tick(20); }
 static void rearm(void)
 {
+    if (controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK) {
+        frame(1518); frame(1518); frame(1518);
+    }
     inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514, now, true};
     inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049, now, true};
     tick(20); inputs[RC_CHANNEL_ARM].pulse_us = 983; tick(20); tick(250);
@@ -207,17 +213,185 @@ static void serial_command(const char *text)
     handle_command(line);
 }
 
+static void test_servo_trim(void)
+{
+    drive_config_t original = controller.drive_config;
+    assert(powertrain_set_steering_trim(STEERING_LEFT, 25));
+    assert(powertrain_set_steering_trim(STEERING_RIGHT, -35));
+    frame(1518);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1455);
+    assert(snapshot().config.steering.trim_us[0] == 25 && snapshot().config.steering.trim_us[1] == -35);
+    assert(snapshot().steering_angle_deg[0] == 0 && snapshot().steering_angle_deg[1] == 0);
+    frame(987); frame(987); frame(987);
+    assert(servo_pwm[0] != 1525 && servo_pwm[1] != 1455);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1565; tick(20);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1455); safe_outputs();
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1514;
+    frame(987); frame(987);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1455); // filter warmup
+    frame(987);
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1455);
+    independent_steering_config_t trimmed = controller.drive_config.steering;
+    assert(!powertrain_set_steering_trim(2, 0));
+    assert(!powertrain_set_steering_trim(STEERING_LEFT, 451));
+    assert(!powertrain_set_steering_trim(STEERING_RIGHT, -441));
+    for (int state = SYSTEM_DRIVE_ARMED; state <= SYSTEM_ESC_CAL_MANUAL; state++) {
+        controller.system_state = state;
+        assert(!powertrain_set_steering_trim(STEERING_LEFT, 0));
+    }
+    controller.system_state = SYSTEM_DISARMED;
+    controller.calibration_in_progress = true;
+    assert(!powertrain_set_steering_trim(STEERING_RIGHT, 0));
+    controller.calibration_in_progress = false;
+    save_fails = true;
+    assert(!powertrain_set_steering_trim(STEERING_LEFT, 0));
+    assert(!powertrain_set_steering_trim(STEERING_RIGHT, 0));
+    save_fails = false;
+    assert(memcmp(&trimmed, &controller.drive_config.steering, sizeof(trimmed)) == 0);
+    tick(20); assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1455);
+    // Existing endpoint commands preserve trim, and reject conflicting travel.
+    steering_servo_config_t servo = trimmed.servo[0];
+    servo.left_us = 1550;
+    assert(!powertrain_set_steering_servo(STEERING_LEFT, &servo));
+    assert(memcmp(&trimmed, &controller.drive_config.steering, sizeof(trimmed)) == 0);
+    servo.left_us = 2100;
+    assert(powertrain_set_steering_servo(STEERING_LEFT, &servo));
+    assert(controller.drive_config.steering.trim_us[0] == 25);
+    assert(powertrain_set_steering_input(&controller.steering_cal));
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1455); // explicit recenter
+    assert(powertrain_set_steering_trim(STEERING_LEFT, 0));
+    assert(powertrain_set_steering_trim(STEERING_RIGHT, 0));
+    tick(20); assert(servo_pwm[0] == 1500 && servo_pwm[1] == 1490);
+    controller.drive_config = original;
+    frame(1518);
+    safe_outputs();
+}
+
+static void test_linkage_limits(void)
+{
+    drive_config_t original = controller.drive_config;
+    independent_steering_defaults(&controller.drive_config.steering);
+    controller.drive_config.steering_smoothing_ms = 0;
+    steering_servo_config_t full_range = {2500,1500,500,300,300};
+    assert(powertrain_set_steering_servo(0, &full_range));
+    assert(powertrain_set_steering_servo(1, &full_range));
+    steering_linkage_limits_t limits = {900,680};
+    assert(powertrain_set_steering_linkage(&limits));
+    frame(2050); frame(2050); frame(2050);
+    assert(servo_pwm[0] == 2255 && servo_pwm[1] == 2255); safe_outputs();
+    assert(fabsf(snapshot().steering_angle_deg[0] + 22.65f) < .001f);
+    frame(987); frame(987); frame(987);
+    assert(servo_pwm[0] == 745 && servo_pwm[1] == 745); safe_outputs();
+    assert(fabsf(snapshot().steering_angle_deg[1] - 22.65f) < .001f);
+    assert(snapshot().config.steering.linkage.outside_tenths_deg == 680);
+    independent_steering_config_t before = controller.drive_config.steering;
+    limits = (steering_linkage_limits_t){450,225};
+    for (int state = SYSTEM_DRIVE_ARMED; state <= SYSTEM_ESC_CAL_MANUAL; state++) {
+        controller.system_state = state;
+        assert(!powertrain_set_steering_linkage(&limits));
+    }
+    controller.system_state = SYSTEM_DISARMED; controller.calibration_in_progress = true;
+    assert(!powertrain_set_steering_linkage(&limits));
+    controller.calibration_in_progress = false; save_fails = true;
+    assert(!powertrain_set_steering_linkage(&limits));
+    save_fails = false;
+    assert(!powertrain_set_steering_linkage(NULL));
+    assert(!powertrain_set_steering_linkage(&(steering_linkage_limits_t){901,680}));
+    assert(!powertrain_set_steering_linkage(&(steering_linkage_limits_t){900,901}));
+    assert(memcmp(&before, &controller.drive_config.steering, sizeof(before)) == 0);
+    tick(20); assert(servo_pwm[0] == 745 && servo_pwm[1] == 745);
+    assert(powertrain_set_steering_linkage(&limits));
+    tick(20); assert(servo_pwm[0] == 1250 && servo_pwm[1] == 1250);
+    assert(snapshot().config.steering.linkage.outside_tenths_deg == 225);
+    assert(powertrain_set_steering_trim(0, 25));
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1500);
+    frame(2050); frame(2050); frame(2050);
+    assert(servo_pwm[0] <= 2025 && servo_pwm[1] <= 1750);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1565; tick(20);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1500); safe_outputs();
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1514;
+    limits.inside_tenths_deg = 0;
+    assert(powertrain_set_steering_linkage(&limits));
+    frame(987); frame(987); frame(987);
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1500);
+    controller.drive_config = original;
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20);
+}
+
+static void test_toe_settings(void)
+{
+    drive_config_t original = controller.drive_config;
+    independent_steering_defaults(&controller.drive_config.steering);
+    controller.drive_config.steering_smoothing_ms = 0;
+    for (int toe = -300; toe <= 300; toe += 600) {
+        assert(powertrain_set_steering_toe(toe));
+        inputs[RC_CHANNEL_STEERING].valid = false; tick(20);
+        assert(snapshot().config.steering.toe_tenths_deg == toe);
+        assert(snapshot().steering_angle_deg[0] == toe / 10.0f);
+        assert(snapshot().steering_angle_deg[1] == -toe / 10.0f);
+        assert(servo_pwm[0] == (toe < 0 ? 2000 : 1000));
+        assert(servo_pwm[1] == (toe < 0 ? 1000 : 2000));
+    }
+    assert(powertrain_set_steering_toe(30));
+    frame(1518); frame(1518); frame(1518);
+    assert(servo_pwm[0] == 1450 && servo_pwm[1] == 1550);
+    assert(snapshot().steering_angle_deg[0] == 3 && snapshot().steering_angle_deg[1] == -3);
+    frame(987); frame(987); frame(987);
+    assert(servo_pwm[0] == 1000 && servo_pwm[1] == 1100);
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20);
+    assert(servo_pwm[0] == 1450 && servo_pwm[1] == 1550);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1565;
+    frame(2050); frame(2050); frame(2050);
+    assert(servo_pwm[0] == 1450 && servo_pwm[1] == 1550);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1514;
+    independent_steering_config_t before = controller.drive_config.steering;
+    for (int state = SYSTEM_DRIVE_ARMED; state <= SYSTEM_ESC_CAL_MANUAL; state++) {
+        controller.system_state = state;
+        assert(!powertrain_set_steering_toe(-15));
+    }
+    controller.system_state = SYSTEM_DISARMED; controller.calibration_in_progress = true;
+    assert(!powertrain_set_steering_toe(-15));
+    controller.calibration_in_progress = false; save_fails = true;
+    assert(!powertrain_set_steering_toe(-15)); save_fails = false;
+    assert(!powertrain_set_steering_toe(301) && !powertrain_set_steering_toe(-301));
+    assert(!powertrain_set_steering_linkage(&(steering_linkage_limits_t){900,0}));
+    assert(!powertrain_set_steering_linkage(&(steering_linkage_limits_t){900,1}));
+    assert(memcmp(&before, &controller.drive_config.steering, sizeof(before)) == 0);
+    assert(powertrain_set_steering_linkage(&(steering_linkage_limits_t){0,900}));
+    assert(!powertrain_set_steering_toe(-1));
+    assert(powertrain_set_steering_toe(300));
+    assert(powertrain_set_steering_toe(30));
+    assert(powertrain_set_steering_linkage(&(steering_linkage_limits_t){900,50}));
+    before = controller.drive_config.steering;
+    assert(!powertrain_set_steering_trim(STEERING_LEFT, 100)); // Valid neutral, but toe would exceed the 55 us outside cap.
+    steering_servo_config_t wider = before.servo[0]; wider.right_us = 500;
+    assert(!powertrain_set_steering_servo(STEERING_LEFT, &wider));
+    assert(memcmp(&before, &controller.drive_config.steering, sizeof(before)) == 0);
+    assert(powertrain_set_steering_toe(-15));
+    powertrain_steering_recenter();
+    assert(servo_pwm[0] == 1525 && servo_pwm[1] == 1475);
+    controller.drive_config = original;
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20); safe_outputs();
+}
+
 static void test_shared_commands(void)
 {
     drive_config_t original = controller.drive_config;
     steering_calibration_t original_input = controller.steering_cal;
     const char *commands[] = {
         "config drivetrain rwd", "config reverse 20", "config drive smoothing 50",
+        "config drivetrain tank", "config tank limit 37", "config steering toe -1.5",
         "config failsafe off", "config failsafe 1570 12", "config rpm poles 16",
         "config rpm ppr 9", "config steering smoothing 123", "config arm-latch on",
         "config steering geometry 450 310 110 25 28",
         "config steering input 2050 1518 987 20",
         "config steering servo right 1000 1510 2100 35 40",
+        "config steering servo left 2500 1500 500 30 30",
+        "config steering servo right 2500 1500 500 30 30",
+        "config steering trim left 25", "config steering trim right -35",
+        "config steering linkage 88.5 67.5",
         "config steering ackermann-strength 0:60 30:20 100:10",
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
@@ -295,6 +469,142 @@ static void test_arming_and_direction(void)
     assert(powertrain_disarm_for_configuration()); safe_outputs();
 }
 
+static void tank_outputs(uint16_t throttle, bool left)
+{
+    for (int i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
+        bool left_side = i == WHEEL_FRONT_LEFT || i == WHEEL_REAR_LEFT;
+        assert(esc_pwm.throttle_us[i] == throttle);
+        assert(esc_pwm.reverse_us[i] == (left == left_side ? 1940 : 1100));
+    }
+}
+
+static void test_tank_mode(void)
+{
+    drive_config_t original = controller.drive_config;
+    steering_calibration_t original_input = controller.steering_cal;
+    independent_steering_defaults(&controller.drive_config.steering);
+    assert(powertrain_set_steering_toe(20));
+    assert(powertrain_set_drivetrain_mode(DRIVETRAIN_TANK));
+    assert(powertrain_set_tank_limit(25));
+    assert(powertrain_set_reverse_limit(0)); // Tank limit is independent, including the reversing side.
+    assert(powertrain_set_drive_smoothing(100));
+    assert(powertrain_set_steering_smoothing(500)); // Cannot delay tank direction or neutral.
+    assert(powertrain_set_permanent_arm_latch_enabled(true));
+    inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
+    inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049,now,true};
+    inputs[RC_CHANNEL_STEERING].valid = false;
+    tick(20); inputs[RC_CHANNEL_ARM].pulse_us = 983; tick(20); tick(300);
+    assert(controller.system_state == SYSTEM_DISARMED); safe_outputs();
+    powertrain_arm_from_cli(); assert(controller.system_state == SYSTEM_DISARMED);
+    frame(2050); frame(2050); frame(2050); tick(300);
+    assert(controller.system_state == SYSTEM_DISARMED); safe_outputs();
+    powertrain_arm_from_cli(); assert(controller.system_state == SYSTEM_DISARMED);
+    frame(1518); frame(1518); frame(1518); rearm(); safe_outputs();
+    assert(servo_pwm[0] == 1467 && servo_pwm[1] == 1533);
+    assert(snapshot().ackermann_strength_percent == 0);
+    assert(!powertrain_set_drivetrain_mode(DRIVETRAIN_AWD) && !powertrain_set_tank_limit(100));
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 978; tick(20); safe_outputs(); // CH1 centered.
+    frame(2050); frame(2050);
+    assert(direction_hold_until_us == now + 120000); safe_outputs();
+    tick(119); safe_outputs(); assert(active_direction == DRIVE_DIRECTION_FORWARD);
+    tick(1); tank_outputs(1100, true); // Reverse lines published only at minimum throttle.
+    tick(20); tank_outputs(1112, true);
+    for (int i = 0; i < 20; i++) tick(20);
+    tank_outputs(1310, true); // 1100 + 25% of 840.
+    assert(servo_pwm[0] == 1467 && servo_pwm[1] == 1533);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 2044; tick(20); tank_outputs(1310, true);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1779; tick(20); tick(20); tank_outputs(1153, true);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1246; tick(20); tank_outputs(1153, true);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 978;
+    for (int i = 0; i < 20; i++) tick(20);
+    tank_outputs(1310, true);
+    frame(1518); tank_outputs(1210, true); // Raw center stops an old median command immediately.
+    tick(20); tick(20); tank_outputs(1100, true);
+    frame(987); frame(987); tick(120); tank_outputs(1100, false);
+    for (int i = 0; i < 20; i++) tick(20);
+    tank_outputs(1310, false);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 1514;
+    tick(20); tick(20); tick(20); tank_outputs(1100, false);
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 978;
+    for (int i = 0; i < 20; i++) tick(20);
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20); safe_outputs();
+    assert(controller.system_state == SYSTEM_DRIVE_ARMED && (controller.drive_inhibit_flags & DRIVE_INHIBIT_STEERING_LOST));
+    assert(strstr(drive_inhibit_reason(controller.drive_inhibit_flags), "CH1") != NULL);
+    frame(987); frame(987); safe_outputs(); // Warmup cannot power motors.
+    frame(987); safe_outputs(); assert(controller.drive_inhibit_flags == 0);
+    tick(120); tank_outputs(1100, false); tick(20); tank_outputs(1112, false);
+    for (int fault = 0; fault < 3; fault++) {
+        if (fault == 0) inputs[RC_CHANNEL_ARM].pulse_us = 2049;
+        if (fault == 1) inputs[RC_CHANNEL_THROTTLE].valid = false;
+        if (fault == 2) inputs[RC_CHANNEL_THROTTLE].pulse_us = 1565;
+        tick(20); safe_outputs(); assert(controller.system_state == SYSTEM_DRIVE_ARMED);
+        inputs[RC_CHANNEL_ARM].pulse_us = 983;
+        inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
+        frame(1518); frame(1518); frame(1518); safe_outputs();
+    }
+    powertrain_disarm(); safe_outputs(); tick(20);
+    assert(controller.drive_inhibit_flags & DRIVE_INHIBIT_CLI);
+    assert(powertrain_disarm_for_configuration());
+    drive_config_t before = controller.drive_config;
+    save_fails = true;
+    assert(!powertrain_set_tank_limit(70) && !powertrain_set_drivetrain_mode(DRIVETRAIN_AWD));
+    save_fails = false;
+    assert(!powertrain_set_tank_limit(101));
+    assert(memcmp(&before, &controller.drive_config, sizeof(before)) == 0);
+    controller.calibration_in_progress = true;
+    assert(!powertrain_set_tank_limit(70) && !powertrain_set_drivetrain_mode(DRIVETRAIN_AWD));
+    controller.calibration_in_progress = false;
+    // Full-power reversal: first finish decelerating, then wait the entire 120 ms.
+    assert(powertrain_set_tank_limit(100)); rearm();
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 978; frame(2050); frame(2050); tick(120);
+    for (int i = 0; i < 75; i++) tick(20);
+    tank_outputs(1940, true);
+    frame(987);
+    for (int i = 0; i < 7; i++) { tick(20); assert(active_direction == DRIVE_DIRECTION_TANK_LEFT); }
+    tank_outputs(1140, true); assert(direction_hold_until_us == 0);
+    tick(20); tank_outputs(1100, true); assert(direction_hold_until_us == now + 120000);
+    tick(119); tank_outputs(1100, true);
+    tick(1); tank_outputs(1100, false);
+    tick(20); tank_outputs(1112, false);
+    assert(powertrain_disarm_for_configuration());
+    assert(powertrain_set_drive_smoothing(0)); rearm();
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 978; frame(2050); frame(2050);
+    tick(119); safe_outputs(); tick(1); tank_outputs(1100, true);
+    tick(20); tank_outputs(1940, true);
+    frame(987); frame(987); tank_outputs(1100, true);
+    tick(119); tank_outputs(1100, true); tick(1); tank_outputs(1100, false);
+    tick(20); tank_outputs(1940, false);
+    assert(powertrain_disarm_for_configuration());
+    assert(powertrain_set_tank_limit(0)); rearm();
+    inputs[RC_CHANNEL_THROTTLE].pulse_us = 978; frame(2050); frame(2050); tick(300); safe_outputs();
+    // Non-latching CH1 faults fully disarm and demand a new physical cycle.
+    assert(powertrain_disarm_for_configuration());
+    assert(powertrain_set_tank_limit(25)); assert(powertrain_set_permanent_arm_latch_enabled(false));
+    frame(1518); frame(1518); rearm();
+    inputs[RC_CHANNEL_STEERING].valid = false; tick(20); safe_outputs();
+    assert(controller.system_state == SYSTEM_DISARMED && !controller.arm_cycle_ready);
+    frame(1518); frame(1518); frame(1518); tick(300);
+    assert(controller.system_state == SYSTEM_DISARMED);
+    rearm(); inputs[RC_CHANNEL_ARM].pulse_us = 2049; tick(20); safe_outputs();
+    assert(controller.system_state == SYSTEM_DISARMED);
+    // Calibration retains its existing all-motor, forward-only behavior in tank mode.
+    assert(powertrain_cal_esc_arm()); assert(powertrain_cal_esc_max());
+    for (int i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) assert(esc_pwm.throttle_us[i] == 1940 && esc_pwm.reverse_us[i] == 1100);
+    assert(!powertrain_set_tank_limit(70) && !powertrain_set_drivetrain_mode(DRIVETRAIN_AWD));
+    assert(powertrain_cal_cancel()); safe_outputs();
+    // Rotation follows calibrated CH1 left/right, not a hard-coded PWM sign.
+    steering_calibration_t inverted_input = original_input;
+    inverted_input.left_us = 987; inverted_input.right_us = 2050;
+    assert(powertrain_set_steering_input(&inverted_input));
+    rearm(); inputs[RC_CHANNEL_THROTTLE].pulse_us = 978;
+    frame(987); frame(987); tick(120); tank_outputs(1100, true);
+    tick(20); tank_outputs(1310, true);
+    assert(powertrain_disarm_for_configuration());
+    assert(powertrain_set_steering_input(&original_input));
+    controller.drive_config = original;
+    powertrain_steering_recenter();
+}
+
 static void test_calibration_workflows(void)
 {
     inputs[RC_CHANNEL_THROTTLE].pulse_us = 1514; inputs[RC_CHANNEL_ARM].pulse_us = 2049;
@@ -342,17 +652,106 @@ static void test_calibration_workflows(void)
     powertrain_print_status(); powertrain_print_help();
 }
 
+static void test_wheel_calibration(void)
+{
+    drive_config_t original = controller.drive_config;
+    independent_steering_defaults(&controller.drive_config.steering);
+    controller.drive_config.drivetrain_mode = DRIVETRAIN_TANK; // Measurement still follows physical CH1.
+    controller.drive_config.steering_smoothing_ms = 0;
+    inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
+    inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049,now,true};
+    frame(1518); frame(1518); frame(1518);
+    controller.arm_cal.loaded_from_nvs = false;
+    assert(!powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_WHEEL_LEFT));
+    controller.arm_cal.loaded_from_nvs = true;
+    controller.drive_config.steering.toe_tenths_deg = 10;
+    assert(!powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_WHEEL_LEFT));
+    controller.drive_config.steering.toe_tenths_deg = 0;
+    frame(2050); assert(!powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_WHEEL_LEFT));
+    frame(1518); frame(1518); frame(1518);
+    wheel_angle_calibration_t points = {5, {{2000,-250},{1750,-100},{1500,0},{1200,80},{1000,280}}};
+    for (int side = 0; side < 2; side++) {
+        powertrain_calibration_kind_t kind = side ? POWERTRAIN_CALIBRATION_WHEEL_RIGHT : POWERTRAIN_CALIBRATION_WHEEL_LEFT;
+        assert(powertrain_remote_calibration_start(kind));
+        assert(snapshot().calibration_active && snapshot().calibration_kind == kind);
+        assert(!powertrain_set_wheel_calibration(side, &points, 250, 280));
+        assert(!powertrain_set_steering_trim(side, 10));
+        frame(2050); frame(2050); frame(2050);
+        assert(servo_pwm[side] == 2000 && servo_pwm[1-side] == 1500); safe_outputs();
+        uint32_t sequence = snapshot().wheel_capture_sequence;
+        assert(powertrain_remote_calibration_capture());
+        assert(snapshot().calibration_values_us[0] == 2000 && snapshot().wheel_capture_sequence == sequence + 1);
+        frame(987); frame(987); frame(987);
+        assert(servo_pwm[side] == 1000 && servo_pwm[1-side] == 1500); safe_outputs();
+        frame(1518); frame(1518); frame(1518);
+        assert(powertrain_cal_cancel());
+        assert(!snapshot().calibration_active && !controller.arm_cycle_ready); safe_outputs();
+    }
+    // Every loss/exit guard terminates the measurement and keeps motor outputs safe.
+    for (int fault = 0; fault < 7; fault++) {
+        inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
+        inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049,now,true};
+        frame(1518); frame(1518); frame(1518);
+        assert(powertrain_remote_calibration_start(POWERTRAIN_CALIBRATION_WHEEL_LEFT));
+        if (fault == 0) inputs[RC_CHANNEL_ARM].pulse_us = 983;
+        if (fault == 1) inputs[RC_CHANNEL_ARM].valid = false;
+        if (fault == 2) inputs[RC_CHANNEL_THROTTLE].pulse_us = 978;
+        if (fault == 3) inputs[RC_CHANNEL_THROTTLE].valid = false;
+        if (fault == 4) inputs[RC_CHANNEL_STEERING].valid = false;
+        if (fault == 5) inputs[RC_CHANNEL_THROTTLE].pulse_us = 1565;
+        tick(fault == 6 ? 120001 : 20);
+        assert(!snapshot().calibration_active && controller.system_state == SYSTEM_DISARMED);
+        assert(!controller.arm_cycle_ready || inputs[RC_CHANNEL_ARM].pulse_us == 2049);
+        safe_outputs();
+    }
+    inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
+    inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049,now,true};
+    frame(1518); frame(1518); frame(1518);
+    independent_steering_config_t before = controller.drive_config.steering;
+    assert(!powertrain_set_wheel_calibration(0, &points, 300, 300)); // Measured range is smaller.
+    save_fails = true; assert(!powertrain_set_wheel_calibration(0, &points, 250, 280)); save_fails = false;
+    assert(memcmp(&before, &controller.drive_config.steering, sizeof(before)) == 0);
+    for (int state = SYSTEM_DRIVE_ARMED; state <= SYSTEM_ESC_CAL_MANUAL; state++) {
+        controller.system_state = state;
+        assert(!powertrain_set_wheel_calibration(0, &points, 250, 280));
+    }
+    controller.system_state = SYSTEM_DISARMED;
+    assert(powertrain_set_wheel_calibration(0, &points, 250, 280));
+    assert(snapshot().config.steering.wheel_calibration[0].count == 5);
+    assert(snapshot().config.steering.geometry.max_left_tenths_deg == 250);
+    assert(!powertrain_set_steering_trim(0, 1));
+    steering_servo_config_t changed = controller.drive_config.steering.servo[0]; changed.left_us = 2100;
+    assert(!powertrain_set_steering_servo(0, &changed));
+    wheel_angle_calibration_t clear = {0};
+    assert(powertrain_set_wheel_calibration(0, &clear, 0, 0));
+    assert(powertrain_set_steering_trim(0, 1));
+    char command[] = "config steering wheel right 25 28 2000:-25 1750:-10 1500:0 1200:8 1000:28";
+    handle_command(command);
+    assert(snapshot().config.steering.wheel_calibration[1].count == 5);
+    controller.drive_config = original;
+    powertrain_steering_recenter();
+}
+
 int main(void)
 {
     inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
     inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049,now,true};
     assert(powertrain_controller_init() == ESP_OK); safe_outputs();
+    assert(servo_pwm[0] == 1473 && servo_pwm[1] == 1519); // saved trims plus toe at PWM startup
+    assert(powertrain_set_steering_toe(0));
+    assert(powertrain_set_steering_trim(STEERING_LEFT, 0));
+    assert(powertrain_set_steering_trim(STEERING_RIGHT, 0));
     assert(powertrain_controller_start() == ESP_OK);
     assert(cli_start() == ESP_OK);
     test_steering_and_settings();
+    test_servo_trim();
+    test_linkage_limits();
+    test_toe_settings();
     test_shared_commands();
     test_arming_and_direction();
+    test_tank_mode();
     test_calibration_workflows();
+    test_wheel_calibration();
     assert(lock_depth == 0);
-    puts("Controller modules passed: steering/speed, config rollback, equal outputs, arming/failsafes, direction hold, calibration/cancel/timeouts and snapshots.");
+    puts("Controller modules passed: steering/toe/speed, config rollback, normal/tank outputs and limits, arming/failsafes, direction holds, calibration/cancel/timeouts and snapshots.");
 }

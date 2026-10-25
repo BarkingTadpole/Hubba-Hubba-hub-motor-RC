@@ -6,8 +6,8 @@
 #include "freertos/FreeRTOS.h"
 #include "pin_config.h"
 
-#define SERVO_PULSE_MIN_US 800
-#define SERVO_PULSE_MAX_US 2200
+_Static_assert(PWM_FRAME_HZ >= SERVO_FREQUENCY_MIN_HZ && PWM_FRAME_HZ <= SERVO_FREQUENCY_MAX_HZ,
+               "Steering PWM frequency must fit the servo specification");
 
 static uint16_t current_pulse_us[STEERING_SERVO_COUNT];
 static const gpio_num_t servo_pins[STEERING_SERVO_COUNT] = {

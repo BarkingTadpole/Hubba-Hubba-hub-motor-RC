@@ -20,7 +20,8 @@
       0
     ],
     "prompt": "",
-    "message": "Mock calibration idle"
+    "message": "Mock calibration idle",
+    "wheel_capture_sequence": 0
   },
   "rc": {
     "throttle": {
@@ -108,15 +109,19 @@
         "left_us": 2000,
         "center_us": 1500,
         "right_us": 1000,
+        "trim_us": 0,
         "left_angle_deg": 30,
-        "right_angle_deg": 30
+        "right_angle_deg": 30,
+        "wheel_points": []
       },
       {
-        "left_us": 1000,
+        "left_us": 2000,
         "center_us": 1500,
-        "right_us": 2000,
+        "right_us": 1000,
+        "trim_us": 0,
         "left_angle_deg": 30,
-        "right_angle_deg": 30
+        "right_angle_deg": 30,
+        "wheel_points": []
       }
     ],
     "ackermann_strength_points": [
@@ -136,11 +141,21 @@
       "max_left_deg": 30,
       "max_right_deg": 30
     },
+    "steering_linkage": {
+      "inside_deg": 90,
+      "outside_deg": 68
+    },
     "steering_input": {
       "left_us": 2050,
       "center_us": 1518,
       "right_us": 987,
       "deadband_us": 30
+    },
+    "tank_limit_percent": 25,
+    "steering_toe_deg": 0,
+    "steering_toe_range": {
+      "min_deg": -30,
+      "max_deg": 30
     }
   }
 }

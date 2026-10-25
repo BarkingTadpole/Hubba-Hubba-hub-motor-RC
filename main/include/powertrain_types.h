@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "steering_servo_limits.h"
+
 #define POWERTRAIN_WHEEL_COUNT 4
 #define REAR_RPM_COUNT 2
 #define RPM_REAR_LEFT 0
@@ -11,7 +13,8 @@
 #define STEERING_LEFT 0
 #define STEERING_RIGHT 1
 #define ACKERMANN_MAX_POINTS 8
-#define INDEPENDENT_STEERING_VERSION 2
+#define WHEEL_CALIBRATION_MAX_POINTS 9
+#define INDEPENDENT_STEERING_VERSION 6
 
 typedef enum {
     WHEEL_FRONT_LEFT = 0,
@@ -45,12 +48,15 @@ static inline const char *system_state_name(system_state_t state)
 typedef enum {
     DRIVE_DIRECTION_FORWARD = 0,
     DRIVE_DIRECTION_REVERSE,
+    DRIVE_DIRECTION_TANK_LEFT,
+    DRIVE_DIRECTION_TANK_RIGHT,
 } drive_direction_t;
 
 typedef enum {
     DRIVETRAIN_AWD = 0,
     DRIVETRAIN_FWD,
     DRIVETRAIN_RWD,
+    DRIVETRAIN_TANK,
 } drivetrain_mode_t;
 
 typedef struct {
@@ -111,6 +117,22 @@ typedef struct {
     uint16_t max_right_tenths_deg;
 } steering_geometry_t;
 
+/* Servo-shaft rotation from trimmed neutral, shared by both wheel roles. */
+typedef struct {
+    uint16_t inside_tenths_deg;
+    uint16_t outside_tenths_deg;
+} steering_linkage_limits_t;
+
+typedef struct {
+    uint16_t pulse_us;
+    int16_t angle_tenths_deg; /* Road wheel: negative left, positive right. */
+} wheel_angle_point_t;
+
+typedef struct {
+    uint16_t count; /* Zero means unmeasured; use the endpoint approximation. */
+    wheel_angle_point_t points[WHEEL_CALIBRATION_MAX_POINTS];
+} wheel_angle_calibration_t;
+
 /* Versioned, fixed-width NVS blob; the entire curve is saved atomically. */
 typedef struct {
     uint16_t version;
@@ -118,11 +140,18 @@ typedef struct {
     steering_geometry_t geometry;
     uint16_t point_count;
     ackermann_point_t points[ACKERMANN_MAX_POINTS];
+    /* Signed neutral offsets; keep the v2 prefix and calibrated endpoints. */
+    int16_t trim_us[STEERING_SERVO_COUNT];
+    steering_linkage_limits_t linkage;
+    /* Per-wheel road angle: positive toe-in, negative toe-out. */
+    int16_t toe_tenths_deg;
+    wheel_angle_calibration_t wheel_calibration[STEERING_SERVO_COUNT];
 } independent_steering_config_t;
 
 typedef struct {
     drivetrain_mode_t drivetrain_mode;
     uint8_t reverse_limit_percent;
+    uint8_t tank_limit_percent;
     uint8_t drive_smoothing_percent;
     bool receiver_failsafe_enabled;
     uint16_t receiver_failsafe_us;

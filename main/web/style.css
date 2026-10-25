@@ -143,6 +143,16 @@ button.danger { border-color: #e2b9bd; background: #fff5f5; color: var(--bad); }
 .technical-notes summary { display: list-item; min-height: 44px; padding: 13px 0; cursor: pointer; color: var(--muted); font-size: 11px; }
 .technical-notes p { padding-bottom: 4px; }
 .calibration-workflow { grid-row: span 2; }
+.wheel-calibration-panel { grid-column: 1 / -1; }
+.wheel-cal-instructions { padding-left: 22px; font-size: 13px; line-height: 1.6; }
+.wheel-cal-instructions li + li { margin-top: 6px; }
+.wheel-cal-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin: 12px 0; }
+.wheel-cal-controls label { min-width: 140px; }
+.wheel-cal-points { table-layout: fixed; }
+.wheel-cal-points th { white-space: normal; }
+.wheel-cal-points th:last-child { width: 70px; }
+.wheel-cal-points input { width: 100%; min-width: 0; }
+.wheel-cal-points button { width: 100%; padding-left: 4px; padding-right: 4px; }
 .calibration-prompt { margin-top: 12px; padding: 12px; border-left: 2px solid var(--accent); background: #f1f5f3; font-size: 14px; font-weight: 600; }
 .calibration-actions, .calibration-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
 .calibration-actions { margin-top: 12px; }

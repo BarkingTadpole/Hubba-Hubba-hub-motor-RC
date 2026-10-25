@@ -15,6 +15,8 @@ typedef enum {
     POWERTRAIN_CALIBRATION_STEERING,
     POWERTRAIN_CALIBRATION_ARM,
     POWERTRAIN_CALIBRATION_ESC,
+    POWERTRAIN_CALIBRATION_WHEEL_LEFT,
+    POWERTRAIN_CALIBRATION_WHEEL_RIGHT,
 } powertrain_calibration_kind_t;
 
 typedef struct {
@@ -29,6 +31,7 @@ typedef struct {
     uint8_t calibration_step;
     uint8_t calibration_total_steps;
     uint16_t calibration_values_us[3];
+    uint32_t wheel_capture_sequence;
     char calibration_prompt[POWERTRAIN_CALIBRATION_PROMPT_MAX];
     char calibration_message[POWERTRAIN_CALIBRATION_MESSAGE_MAX];
     rc_channel_sample_t throttle_input;
@@ -61,6 +64,7 @@ bool powertrain_disarm_for_configuration(void);
 
 bool powertrain_set_drivetrain_mode(drivetrain_mode_t mode);
 bool powertrain_set_reverse_limit(uint8_t percent);
+bool powertrain_set_tank_limit(uint8_t percent);
 bool powertrain_set_drive_smoothing(uint8_t percent);
 bool powertrain_set_failsafe(uint16_t pulse_us, uint16_t window_us);
 bool powertrain_set_failsafe_enabled(bool enabled);
@@ -68,6 +72,11 @@ bool powertrain_set_motor_poles(uint8_t poles);
 bool powertrain_set_rpm_pulses_per_revolution(uint16_t pulses_per_revolution);
 bool powertrain_set_steering_smoothing(uint16_t smoothing_ms);
 bool powertrain_set_steering_servo(uint8_t side, const steering_servo_config_t *servo);
+bool powertrain_set_wheel_calibration(uint8_t side, const wheel_angle_calibration_t *calibration,
+                                     uint16_t max_left, uint16_t max_right);
+bool powertrain_set_steering_trim(uint8_t side, int16_t trim_us);
+bool powertrain_set_steering_linkage(const steering_linkage_limits_t *limits);
+bool powertrain_set_steering_toe(int16_t tenths_deg);
 bool powertrain_set_steering_geometry(const steering_geometry_t *geometry);
 bool powertrain_set_steering_input(const steering_calibration_t *calibration);
 bool powertrain_set_ackermann_curve(const ackermann_point_t *points, uint16_t count);

@@ -63,6 +63,7 @@ static void handle_command(char *line)
         powertrain_monitor_rpm();
     } else if (strncmp(line, "config ", 7) == 0 ||
                strncmp(line, "cal esc ", 8) == 0 ||
+               strncmp(line, "cal wheel ", 10) == 0 || strcmp(line, "cal capture") == 0 ||
                strcmp(line, "cal manual") == 0 || strcmp(line, "cal cancel") == 0 ||
                strcmp(line, "disarm config") == 0) {
         remote_command_t command;

@@ -28,6 +28,21 @@ static void expect_invalid(const char *line)
 
 static void test_drivetrain_and_scalar_commands(void)
 {
+    remote_command_t wheel = parse_valid("config steering wheel left 25 28 2000:-25 1750:-10.5 1500:0 1000:28");
+    CHECK(wheel.operation == REMOTE_CONFIG_WHEEL_CALIBRATION && wheel.unsigned_values[0] == STEERING_LEFT);
+    CHECK(wheel.wheel_calibration.count == 4 && wheel.wheel_calibration.points[1].angle_tenths_deg == -105);
+    CHECK(wheel.geometry.max_left_tenths_deg == 250 && wheel.geometry.max_right_tenths_deg == 280);
+    wheel = parse_valid("config steering wheel right clear");
+    CHECK(wheel.wheel_calibration.count == 0 && wheel.unsigned_values[0] == STEERING_RIGHT);
+    CHECK(parse_valid("cal wheel left").operation == REMOTE_CALIBRATE_WHEEL_LEFT);
+    CHECK(parse_valid("cal wheel right").operation == REMOTE_CALIBRATE_WHEEL_RIGHT);
+    const char *bad_wheel[] = {"cal wheel", "cal wheel rear", "cal wheel left 1500", "config steering wheel left clear extra",
+        "config steering wheel left 30 30 2000:-30 1500:0", "config steering wheel left 30 30 2000:-30 1500:0 499:30",
+        "config steering wheel left 30 30 2000:-30 1500:0 1000:85.1", "config steering wheel left nan 30 2000:-30 1500:0 1000:30",
+        "config steering wheel left 30 30 2000:-30 1500:0 1000:nan", "config steering wheel left 30 30 2000:-30 1500:0 1000:1.01",
+        "config steering wheel left 30 30 2000:-30 1500:0 1000.5:30", "config steering wheel left 30 30 2000:-30 1500:0 1000:30 extra",
+        "config steering wheel left 30 30 2000:-30 1900:-25 1800:-20 1700:-15 1600:-10 1500:0 1400:10 1300:15 1200:20 1000:30"};
+    for (unsigned i = 0; i < sizeof(bad_wheel) / sizeof(bad_wheel[0]); i++) expect_invalid(bad_wheel[i]);
     remote_command_t command = parse_valid("disarm config");
     CHECK(command.operation == REMOTE_DISARM_FOR_CONFIG);
 
@@ -39,6 +54,34 @@ static void test_drivetrain_and_scalar_commands(void)
     CHECK(command.drivetrain_mode == DRIVETRAIN_FWD);
     command = parse_valid("config drivetrain rwd");
     CHECK(command.drivetrain_mode == DRIVETRAIN_RWD);
+    command = parse_valid("config drivetrain tank");
+    CHECK(command.drivetrain_mode == DRIVETRAIN_TANK);
+    command = parse_valid("config tank limit 25");
+    CHECK(command.operation == REMOTE_CONFIG_TANK_LIMIT && command.unsigned_values[0] == 25);
+    command = parse_valid("config tank limit 0");
+    CHECK(command.unsigned_values[0] == 0);
+    command = parse_valid("config tank limit 100");
+    CHECK(command.unsigned_values[0] == 100);
+    command = parse_valid("config steering toe +1.5");
+    CHECK(command.operation == REMOTE_CONFIG_STEERING_TOE && command.toe_tenths_deg == 15);
+    command = parse_valid("config steering toe -30");
+    CHECK(command.toe_tenths_deg == -300);
+    command = parse_valid("config steering toe 22.6");
+    CHECK(command.toe_tenths_deg == 226);
+    command = parse_valid("config steering toe 85");
+    CHECK(command.toe_tenths_deg == 850);
+    // Parsing only enforces representation; the shared settings guard checks actual travel.
+    command = parse_valid("config steering toe 3276.7");
+    CHECK(command.toe_tenths_deg == INT16_MAX);
+    command = parse_valid("config steering toe -3276.8");
+    CHECK(command.toe_tenths_deg == INT16_MIN);
+    command = parse_valid("config steering toe 0");
+    CHECK(command.toe_tenths_deg == 0);
+    const char *invalid[] = {"config tank limit -1", "config tank limit 101", "config tank limit 12.5",
+        "config tank limit 4294967296", "config tank limit 25 extra", "config steering toe 3276.8",
+        "config steering toe -3276.9", "config steering toe nan", "config steering toe inf",
+        "config steering toe 0.01", "config steering toe 1 extra", "config steering toe ", "tank left"};
+    for (unsigned i = 0; i < sizeof(invalid)/sizeof(invalid[0]); i++) expect_invalid(invalid[i]);
 
     command = parse_valid("config reverse 10");
     CHECK(command.operation == REMOTE_CONFIG_REVERSE_LIMIT);
@@ -93,6 +136,24 @@ static void test_independent_steering_commands(void)
     remote_command_t c = parse_valid("config steering servo right 1000 1490 2000 30 30");
     CHECK(c.operation == REMOTE_CONFIG_STEERING_SERVO);
     CHECK(c.unsigned_values[0] == STEERING_RIGHT && c.servo.center_us == 1490);
+    c = parse_valid("config steering trim left +25");
+    CHECK(c.operation == REMOTE_CONFIG_STEERING_TRIM && c.unsigned_values[0] == STEERING_LEFT && c.steering_trim_us == 25);
+    c = parse_valid("config steering trim right -35");
+    CHECK(c.operation == REMOTE_CONFIG_STEERING_TRIM && c.unsigned_values[0] == STEERING_RIGHT && c.steering_trim_us == -35);
+    c = parse_valid("config steering trim right 0");
+    CHECK(c.steering_trim_us == 0);
+    c = parse_valid("config steering linkage 90 68");
+    CHECK(c.operation == REMOTE_CONFIG_STEERING_LINKAGE && c.linkage.inside_tenths_deg == 900 && c.linkage.outside_tenths_deg == 680);
+    c = parse_valid("config steering linkage 45.5 0");
+    CHECK(c.linkage.inside_tenths_deg == 455 && c.linkage.outside_tenths_deg == 0);
+    c = parse_valid("config steering linkage 0 90");
+    CHECK(c.linkage.inside_tenths_deg == 0 && c.linkage.outside_tenths_deg == 900);
+    c = parse_valid("config steering trim left 1900"); CHECK(c.steering_trim_us == 1900);
+    c = parse_valid("config steering trim right -1900"); CHECK(c.steering_trim_us == -1900);
+    c = parse_valid("config steering servo left 2500 1500 500 30 30");
+    CHECK(c.servo.left_us == 2500 && c.servo.center_us == 1500 && c.servo.right_us == 500);
+    c = parse_valid("config steering servo right 500 550 2500 30 30");
+    CHECK(c.servo.left_us == 500 && c.servo.center_us == 550 && c.servo.right_us == 2500);
     c = parse_valid("config steering ackermann-strength 0:60 10.5:40.2 100:20");
     CHECK(c.operation == REMOTE_CONFIG_ACKERMANN && c.point_count == 3);
     CHECK(c.points[1].speed_tenths_kmh == 105 && c.points[1].strength_tenths_percent == 402);
@@ -105,6 +166,25 @@ static void test_independent_steering_commands(void)
     c = parse_valid("config steering ackermann-strength 0:100 1:80 2:60 3:40 4:20 5:10 6:5 300:0");
     CHECK(c.point_count == 8);
     const char *invalid[] = {
+        "config steering linkage 90.1 68", "config steering linkage 90 90.1",
+        "config steering linkage -1 68", "config steering linkage 90 -1",
+        "config steering linkage 90 68.01", "config steering linkage 90 nan",
+        "config steering linkage inf 68", "config steering linkage 90",
+        "config steering linkage 90 68 extra", "config steering linkage 65536 68",
+        "config steering linkage 90 1e30",
+        "config steering trim left 1901", "config steering trim right -1901",
+        "config steering servo left 2501 1500 500 30 30",
+        "config steering servo right 2500 1500 499 30 30",
+        "config steering servo left 2500 1500 500 180 180",
+        "config steering input 2500 1500 500 30",
+        "config steering trim left 25.5", "config steering trim left nan",
+        "config steering trim left inf", "config steering trim left 0x10",
+        "config steering trim right 1e2", "config steering trim right +",
+        "config steering trim right --1", "config steering trim left ",
+        "config steering trim right -", "config steering trim both 10",
+        "config steering trim left 10 extra", "config steering trim left 65536",
+        "config steering trim left -65536", "config steering trim left 999999999999999999999999999",
+        "config steering trim left -999999999999999999999999999",
         "config steering ackermann 0:50 100:0",
         "config steering ackermann-strength 0:-0.1 100:0",
         "config steering geometry 0 320 107 30 30",

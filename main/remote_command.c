@@ -3,6 +3,7 @@
 #include "calibration_validation.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,19 @@ static bool parse_unsigned(const char *text, uint32_t maximum, uint32_t *value)
     return true;
 }
 
+static bool parse_steering_trim(const char *text, int16_t *value)
+{
+    const char *digits = text + (text[0] == '-' || text[0] == '+');
+    if (*digits < '0' || *digits > '9') return false;
+    char *end;
+    errno = 0;
+    long parsed = strtol(text, &end, 10);
+    if (errno == ERANGE || *end != '\0' ||
+        parsed < -STEERING_TRIM_MAX_US || parsed > STEERING_TRIM_MAX_US) return false;
+    *value = (int16_t)parsed;
+    return true;
+}
+
 /* Decode bounded fixed-point fields before narrowing to persisted integers. */
 static bool parse_fixed_values(const char *text, uint16_t *values, size_t count, bool tenths)
 {
@@ -43,6 +57,38 @@ static bool parse_fixed_values(const char *text, uint16_t *values, size_t count,
     }
     while (isspace((unsigned char)*text)) text++;
     return *text == '\0';
+}
+
+static bool parse_wheel_calibration(const char *text, remote_command_t *command)
+{
+    if (strcmp(text, "clear") == 0) return true;
+    uint16_t maxima[2];
+    for (size_t i = 0; i < 2; i++) {
+        char *end;
+        float value = strtof(text, &end) * 10.0f;
+        if (end == text || !isspace((unsigned char)*end) || !isfinite(value) ||
+            value < 10 || value > 850 || fabsf(value - roundf(value)) > .001f) return false;
+        maxima[i] = lroundf(value);
+        text = end;
+        while (isspace((unsigned char)*text)) text++;
+    }
+    command->geometry.max_left_tenths_deg = maxima[0];
+    command->geometry.max_right_tenths_deg = maxima[1];
+    wheel_angle_calibration_t *cal = &command->wheel_calibration;
+    while (*text != '\0') {
+        if (cal->count >= WHEEL_CALIBRATION_MAX_POINTS || !isdigit((unsigned char)*text)) return false;
+        char *end;
+        unsigned long pulse = strtoul(text, &end, 10);
+        if (*end != ':' || pulse < SERVO_PULSE_MIN_US || pulse > SERVO_PULSE_MAX_US) return false;
+        text = end + 1;
+        float angle = strtof(text, &end) * 10.0f;
+        if (end == text || (*end != '\0' && !isspace((unsigned char)*end)) || !isfinite(angle) ||
+            angle < -850 || angle > 850 || fabsf(angle - roundf(angle)) > .001f) return false;
+        cal->points[cal->count++] = (wheel_angle_point_t){pulse, lroundf(angle)};
+        text = end;
+        while (isspace((unsigned char)*text)) text++;
+    }
+    return cal->count >= 3;
 }
 
 bool remote_command_parse(const char *line,
@@ -72,6 +118,10 @@ bool remote_command_parse(const char *line,
         command->operation = REMOTE_CALIBRATE_ARM;
         return true;
     }
+    if (strcmp(line, "cal wheel left") == 0 || strcmp(line, "cal wheel right") == 0) {
+        command->operation = strcmp(line, "cal wheel left") == 0 ? REMOTE_CALIBRATE_WHEEL_LEFT : REMOTE_CALIBRATE_WHEEL_RIGHT;
+        return true;
+    }
     if (strcmp(line, "cal capture") == 0) {
         command->operation = REMOTE_CALIBRATE_CAPTURE;
         return true;
@@ -98,12 +148,19 @@ bool remote_command_parse(const char *line,
     }
     if (strcmp(line, "config drivetrain awd") == 0 ||
         strcmp(line, "config drivetrain fwd") == 0 ||
-        strcmp(line, "config drivetrain rwd") == 0) {
+        strcmp(line, "config drivetrain rwd") == 0 ||
+        strcmp(line, "config drivetrain tank") == 0) {
         command->operation = REMOTE_CONFIG_DRIVETRAIN;
         command->drivetrain_mode = line[18] == 'a' ? DRIVETRAIN_AWD
                                    : line[18] == 'f' ? DRIVETRAIN_FWD
-                                                     : DRIVETRAIN_RWD;
+                                   : line[18] == 'r' ? DRIVETRAIN_RWD : DRIVETRAIN_TANK;
         return true;
+    }
+    if (strncmp(line, "config tank limit ", 18) == 0) {
+        command->operation = REMOTE_CONFIG_TANK_LIMIT;
+        if (parse_unsigned(line + 18, 100, &command->unsigned_values[0])) return true;
+        set_error(error, error_size, "usage: config tank limit <0-100>");
+        return false;
     }
     if (strncmp(line, "config reverse ", 15) == 0) {
         command->operation = REMOTE_CONFIG_REVERSE_LIMIT;
@@ -173,6 +230,43 @@ bool remote_command_parse(const char *line,
                   "usage: config steering smoothing <0-500>");
         return false;
     }
+    if (strncmp(line, "config steering wheel ", 22) == 0) {
+        const char *text = line + 22;
+        bool left = strncmp(text, "left ", 5) == 0, right = strncmp(text, "right ", 6) == 0;
+        if ((left || right) && parse_wheel_calibration(text + (left ? 5 : 6), command)) {
+            command->operation = REMOTE_CONFIG_WHEEL_CALIBRATION;
+            command->unsigned_values[0] = left ? STEERING_LEFT : STEERING_RIGHT;
+            return true;
+        }
+        set_error(error, error_size, "use config steering wheel <left|right> <max_left_deg> <max_right_deg> <pwm:signed_wheel_deg>... (3-9 points), or <left|right> clear");
+        return false;
+    }
+    if (strncmp(line, "config steering toe ", 20) == 0) {
+        const char *cursor = line + 20;
+        char *end;
+        float value = strtof(cursor, &end), tenths = value * 10.0f;
+        if (end != cursor && *end == '\0' && isfinite(tenths) &&
+            tenths >= INT16_MIN && tenths <= INT16_MAX &&
+            fabsf(tenths - roundf(tenths)) <= 0.001f) {
+            command->operation = REMOTE_CONFIG_STEERING_TOE;
+            command->toe_tenths_deg = (int16_t)lroundf(tenths);
+            return true;
+        }
+        set_error(error, error_size, "use config steering toe <signed_degrees>; per wheel, +in/-out, one decimal; must fit calibrated/linkage travel");
+        return false;
+    }
+    if (strncmp(line, "config steering trim ", 21) == 0) {
+        const char *cursor = line + 21;
+        bool left = strncmp(cursor, "left ", 5) == 0;
+        bool right = strncmp(cursor, "right ", 6) == 0;
+        if ((left || right) && parse_steering_trim(cursor + (left ? 5 : 6), &command->steering_trim_us)) {
+            command->operation = REMOTE_CONFIG_STEERING_TRIM;
+            command->unsigned_values[0] = left ? STEERING_LEFT : STEERING_RIGHT;
+            return true;
+        }
+        set_error(error, error_size, "use config steering trim <left|right> <signed_us>; integer -1900..1900, trimmed center must stay >=50 us inside endpoints");
+        return false;
+    }
     if (strncmp(line, "config steering servo ", 22) == 0) {
         const char *cursor = line + 22;
         bool left = strncmp(cursor, "left ", 5) == 0;
@@ -189,7 +283,19 @@ bool remote_command_parse(const char *line,
                 return true;
             }
         }
-        set_error(error, error_size, "use config steering servo <left|right> <left_us> <center_us> <right_us> <left_deg> <right_deg>; PWM 800-2200, angle magnitudes 1-85");
+        set_error(error, error_size, "use config steering servo <left|right> <left_us> <center_us> <right_us> <left_deg> <right_deg>; PWM 500-2500, road-wheel angles 1-85");
+        return false;
+    }
+    if (strncmp(line, "config steering linkage ", 24) == 0) {
+        uint16_t values[2];
+        if (parse_fixed_values(line + 24, values, 2, true)) {
+            command->linkage = (steering_linkage_limits_t){values[0], values[1]};
+            if (steering_linkage_limits_valid(&command->linkage)) {
+                command->operation = REMOTE_CONFIG_STEERING_LINKAGE;
+                return true;
+            }
+        }
+        set_error(error, error_size, "use config steering linkage <inside_deg> <outside_deg>; shaft travel from trimmed neutral, 0-90 degrees, one decimal");
         return false;
     }
     if (strncmp(line, "config steering geometry ", 25) == 0) {

@@ -1,12 +1,14 @@
 #include "powertrain_internal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "calibration_validation.h"
 #include "config_store.h"
 #include "esc_output.h"
 #include "esp_timer.h"
+#include "servo_output.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -29,6 +31,22 @@ static remote_calibration_state_t remote_calibration = {
     .message = "No browser calibration has been started",
 };
 static int64_t esc_cal_last_command_us;
+static uint32_t wheel_capture_sequence;
+
+int powertrain_calibration_wheel_side(void)
+{
+    if (!remote_calibration.active) return -1;
+    if (remote_calibration.kind == POWERTRAIN_CALIBRATION_WHEEL_LEFT) return STEERING_LEFT;
+    if (remote_calibration.kind == POWERTRAIN_CALIBRATION_WHEEL_RIGHT) return STEERING_RIGHT;
+    return -1;
+}
+
+static bool wheel_measurement_inputs_safe(void)
+{
+    return controller.system_state == SYSTEM_DISARMED && controller.arm_cal.loaded_from_nvs &&
+           shutdown_channel_is_safe() && throttle_is_neutral() && !throttle_matches_failsafe() &&
+           rc_input_is_valid(RC_CHANNEL_STEERING);
+}
 
 static bool calibration_allowed(bool require_neutral, bool require_saved_shutdown)
 {
@@ -213,6 +231,8 @@ static const char *remote_calibration_kind_name(powertrain_calibration_kind_t ki
     case POWERTRAIN_CALIBRATION_STEERING: return "steering";
     case POWERTRAIN_CALIBRATION_ARM: return "CH4 arm/output inhibit";
     case POWERTRAIN_CALIBRATION_ESC: return "ESC endpoints/manual relay";
+    case POWERTRAIN_CALIBRATION_WHEEL_LEFT: return "left wheel angle";
+    case POWERTRAIN_CALIBRATION_WHEEL_RIGHT: return "right wheel angle";
     default: return "none";
     }
 }
@@ -241,12 +261,16 @@ static const char *remote_calibration_prompt(powertrain_calibration_kind_t kind,
     case POWERTRAIN_CALIBRATION_THROTTLE: return throttle_prompts[step];
     case POWERTRAIN_CALIBRATION_STEERING: return steering_prompts[step];
     case POWERTRAIN_CALIBRATION_ARM: return arm_prompts[step];
+    case POWERTRAIN_CALIBRATION_WHEEL_LEFT:
+    case POWERTRAIN_CALIBRATION_WHEEL_RIGHT:
+        return "Use CH1 to position this wheel; capture PWM, measure road-wheel angle, then enter it below";
     default: return "No calibration is active";
     }
 }
 
 static void remote_calibration_finish(const char *message)
 {
+    bool was_wheel = powertrain_calibration_wheel_side() >= 0;
     remote_calibration.active = false;
     remote_calibration.sampling = false;
     remote_calibration.kind = POWERTRAIN_CALIBRATION_NONE;
@@ -258,12 +282,13 @@ static void remote_calibration_finish(const char *message)
     snprintf(remote_calibration.message, sizeof(remote_calibration.message),
              "%s", message);
     controller.calibration_in_progress = false;
+    if (was_wheel) powertrain_steering_recenter();
 }
 
 bool powertrain_remote_calibration_start(powertrain_calibration_kind_t kind)
 {
-    if (kind < POWERTRAIN_CALIBRATION_THROTTLE ||
-        kind > POWERTRAIN_CALIBRATION_ARM) {
+    bool wheel = kind == POWERTRAIN_CALIBRATION_WHEEL_LEFT || kind == POWERTRAIN_CALIBRATION_WHEEL_RIGHT;
+    if (!wheel && (kind < POWERTRAIN_CALIBRATION_THROTTLE || kind > POWERTRAIN_CALIBRATION_ARM)) {
         return false;
     }
 
@@ -273,11 +298,19 @@ bool powertrain_remote_calibration_start(powertrain_calibration_kind_t kind)
         controller_unlock();
         return false;
     }
+    rc_channel_sample_t steering;
+    if (wheel && (!wheel_measurement_inputs_safe() || controller.drive_config.steering.toe_tenths_deg != 0 ||
+        !rc_input_get(RC_CHANNEL_STEERING, &steering) ||
+        abs((int)steering.pulse_us - controller.steering_cal.center_us) > controller.steering_cal.deadband_us)) {
+        printf("ERR: wheel measurement needs saved CH4 STOP, neutral CH1/CH2, healthy receiver and zero toe\n");
+        controller_unlock();
+        return false;
+    }
 
     memset(&remote_calibration, 0, sizeof(remote_calibration));
     remote_calibration.active = true;
     remote_calibration.kind = kind;
-    remote_calibration.total_steps = 3U;
+    remote_calibration.total_steps = wheel ? 0U : 3U;
     remote_calibration.last_action_us = esp_timer_get_time();
     snprintf(remote_calibration.prompt, sizeof(remote_calibration.prompt), "%s",
              remote_calibration_prompt(kind, 0));
@@ -286,6 +319,12 @@ bool powertrain_remote_calibration_start(powertrain_calibration_kind_t kind)
              remote_calibration_kind_name(kind));
     controller.calibration_in_progress = true;
     controller.arm_run_candidate_since_us = 0;
+    if (wheel) {
+        controller.arm_cycle_ready = false;
+        reset_drive_state();
+        esc_output_set_safe();
+        powertrain_steering_recenter();
+    }
     controller_unlock();
     return true;
 }
@@ -297,6 +336,19 @@ bool powertrain_remote_calibration_capture(void)
         printf("ERR: no browser calibration step is ready to capture\n");
         controller_unlock();
         return false;
+    }
+    int wheel_side = powertrain_calibration_wheel_side();
+    if (wheel_side >= 0) {
+        if (!wheel_measurement_inputs_safe()) { controller_unlock(); return false; }
+        uint16_t pulses[STEERING_SERVO_COUNT];
+        servo_output_get_pulses(pulses);
+        remote_calibration.values_us[0] = pulses[wheel_side];
+        remote_calibration.last_action_us = esp_timer_get_time();
+        wheel_capture_sequence++;
+        snprintf(remote_calibration.message, sizeof(remote_calibration.message),
+                 "Captured commanded servo PWM %u us; enter the measured road-wheel angle", pulses[wheel_side]);
+        controller_unlock();
+        return true;
     }
 
     powertrain_calibration_kind_t kind = remote_calibration.kind;
@@ -538,6 +590,7 @@ void powertrain_calibration_snapshot(powertrain_remote_snapshot_t *snapshot)
     snapshot->calibration_kind = remote_calibration.kind;
     snapshot->calibration_step = remote_calibration.step;
     snapshot->calibration_total_steps = remote_calibration.total_steps;
+    snapshot->wheel_capture_sequence = wheel_capture_sequence;
     memcpy(snapshot->calibration_values_us, remote_calibration.values_us,
            sizeof(snapshot->calibration_values_us));
     snprintf(snapshot->calibration_prompt, sizeof(snapshot->calibration_prompt), "%s",
@@ -573,6 +626,12 @@ void powertrain_calibration_snapshot(powertrain_remote_snapshot_t *snapshot)
 void powertrain_calibration_check_timeout(void)
 {
     int64_t now_us = esp_timer_get_time();
+    if (powertrain_calibration_wheel_side() >= 0 && !wheel_measurement_inputs_safe()) {
+        remote_calibration_finish("Wheel measurement stopped: keep CH4 STOP, CH2 neutral and receiver signals healthy");
+        controller.arm_cycle_ready = false;
+        reset_drive_state();
+        esc_output_set_safe();
+    }
     if (remote_calibration.active && !remote_calibration.sampling &&
         now_us - remote_calibration.last_action_us > REMOTE_CAL_TIMEOUT_US) {
         remote_calibration_finish(

@@ -25,7 +25,9 @@ There is one independent PWM steering servo on each front wheel. Receiver
 CH1 is validated, filtered, normalized, and mapped to independent servo
 endpoints. A user-defined speed/Ackermann-strength curve blends parallel and ideal
 geometric wheel-angle targets before per-servo angle-to-PWM conversion. Normal drive supplies equal commands to the selected AWD/FWD/RWD
-motors. Rear-wheel speed estimation is retained.
+motors. Tank mode rotates using opposing left/right motor directions, with CH1
+selecting rotation and either CH2 direction supplying magnitude. Shared signed
+toe is applied after normal steering geometry. Rear-wheel speed estimation is retained.
 
 Removed on this branch: torque vectoring, front RPM capture, IMU, Dragy,
 shared I2C, UART1 GPS, CH5 mode input, the mechanical steering table, and
@@ -56,7 +58,17 @@ The user approved GPIO32 left and GPIO26 right. Disconnect old CH5 from
 GPIO26 before driving it. GPIO34/35, GPIO23/22, GPIO4/5 are now unassigned.
 Never connect driven receiver and servo signals together. Each servo has
 its own signal wire and a suitable BEC/regulated power source with common
-ground. Verify 3.3 V servo logic acceptance or use a buffer.
+ground. Verify 3.3 V servo logic acceptance or use a buffer. The user identified
+ANNIMOS BLS3325, 25 kg / 180-degree brushless positional servos, model
+DSBL3325180, [ASIN B0DQPSVCTR](https://www.amazon.ca/dp/B0DQPSVCTR).
+The selected listing was checked on 2026-10-24 against the supplied specs:
+4.8–8.4 V, 500–2500 us, 1500 us nominal
+neutral, 2 us internal deadband and 50–330 Hz. The 2 us servo deadband is not
+the receiver input deadband. At 8.4 V each servo is rated 6.2 A stall; two sum
+to 12.4 A. Full electrical ratings are in the architecture guide; these are
+seller-listed specifications, not measured supply/current performance. The
+"25 kg" product title and 30 kg.cm at 8.4 V table describe this same variant;
+do not substitute another 25 kg model's specs or the 270-degree variant.
 
 All eight high-speed LEDC channels serve ESCs. Two separate low-speed LEDC
 channels (0/1) serve steering. All outputs are 50 Hz. Keep four ESC output
@@ -117,7 +129,22 @@ instructions and a 3.5 V minimum spec; ESP32 3V3 is not preferred final power.
 - AWD drives all motors, FWD front only, RWD rear only. Inactive motors stay
   1100/1100 even during reverse. Invalid runtime drivetrain selection safes
   all motors; invalid saved mode falls back AWD. Equal selected-wheel commands
-  are intentional. No per-wheel software motor direction inversion.
+  are intentional in these three modes. Tank drives all four: left rotation
+  reverses FL/RL with FR/RR forward; right rotation does the opposite. This is
+  an operating mode, not a physical motor-wiring inversion setting.
+- Tank selection is DISARMED-only through the existing drivetrain setting.
+  CH1 chooses spin direction, independent of deflection magnitude; either CH2
+  direction provides quadratic power. Centering either stops through deceleration.
+  A separate 0-100% tank throttle cap defaults to 25%; the normal reverse cap
+  does not apply in tank. Zero disables tank power; this is not closed-loop speed control.
+  Tank reversals first ramp all four throttles to minimum, hold there 120 ms,
+  then publish the new reverse signals at minimum for a control cycle before
+  accelerating. Smoothing=0 still retains this hold. Tank additionally requires
+  valid centered CH1 for initial arm qualification. Missing CH1/filter warmup
+  safes all eight outputs, inhibiting with latch on or disarming with latch off.
+  Tank keeps the CH1 median filter, bypasses its smoothing, and suppresses an
+  old direction immediately on raw center or opposite-side input. Servos hold
+  the configured toe alignment and Ackermann is bypassed.
 - ESC calibration/manual relay still addresses all four motors. Saved CH4,
   recognized STOP, and receiver guards remain required. CH4 exit, receiver
   loss, enabled failsafe, cancellation or 30-second timeout restores safe PWM.
@@ -143,13 +170,90 @@ centers immediately, bypassing smoothing. Fresh samples rebuild median history.
 Steering continues while disarmed; CH4 controls motors. CH1 calibration stays
 separate from servo output endpoint settings.
 
-Each servo has wheel-left, center, wheel-right PWM in 800–2200 us; center must
+Each servo has wheel-left, center, wheel-right PWM in 500–2500 us; center must
 be bracketed by endpoints at least 50 us away. Swap endpoint order to reverse
-mounting; centers trim straight ahead. Left/right endpoint road-wheel angle
-magnitudes (1–85 degrees, 0.1-degree precision) map linearly to PWM on each side
-of center. Default PWM 2000/1500/1000 and endpoint angles 30/30 degrees are
+mounting. Each servo also has a signed integer `trim_us`, default zero, added
+to its base center. Trimmed neutral must also stay >=50 us inside both endpoints.
+Trims adjust neutral while holding endpoint PWM fixed; angle-to-PWM mapping
+uses measured piecewise interpolation when available, otherwise a linear
+approximation from trimmed neutral to each endpoint. Positive trim increases PWM
+regardless of mounting. Trimmed neutral is the zero-angle reference; startup
+and input-loss centering include the configured toe alignment.
+The `config steering trim <left|right> <signed_us>` command and monitor controls
+save each trim separately while DISARMED/outside calibration. Endpoint edits
+preserve trim and reject conflicts; failed saves restore RAM.
+Left/right endpoint road-wheel angle magnitudes (1–85 degrees, 0.1-degree
+precision) anchor the PWM mapping on each side of trimmed neutral.
+Default PWM 2000/1500/1000 and endpoint angles 30/30 degrees are
 unmeasured starting assumptions. Live degree values are model targets, not
 measured wheel angles. Check nonlinear linkage response at intermediate angles.
+The servo's 180-degree rating is shaft travel, not road-wheel travel. Retain
+the initial narrower PWM travel until linkage limits are measured. Model and
+driver bounds share `include/steering_servo_limits.h`; receiver input bounds
+stay 800–2200 us. Absolute trim bound is +/-1900 us, further limited by endpoints.
+
+User mounting: left wheel inside CCW/outside CW; right wheel inside CW/outside
+CCW. Since increasing PWM is CCW, BOTH servos use higher PWM for a left turn
+and lower PWM for a right turn. Left turn: left inside/right outside, both
+CCW. Right turn: left outside/right inside, both CW. Defaults match this;
+saved endpoint order is retained and the monitor flags reversed mappings.
+
+Wheel-angle calibration is distinct from receiver CH1 calibration and the removed
+single-steering mechanical table. Each front wheel may store 3-9 measured
+PWM/signed-road-angle pairs, in increasing angle order, negative left/positive
+right. PWM must be strictly monotonic in the saved mounting direction. Include
+exactly one 0-degree point at center + trim and measured endpoints at least
+50 us either side of base/trimmed center. Interpolate between measured points,
+including inverse lookup for linkage and toe bounds; do not extrapolate. Zero
+points means unmeasured, including all migrated settings; never label the 30-degree
+defaults as measured. Live degree targets remain model outputs, not sensor feedback.
+Changing trim or endpoint calibration with an incompatible measured curve is
+rejected; explicitly clear that wheel's measurements before recalibrating it.
+Clearing retains endpoint values as an unmeasured approximation.
+
+Monitor Calibrate > Wheel angle calibration supports physical-CH1 positioning,
+commanded-PWM capture, manual PWM/angle entry, per-wheel drafts and a save preview.
+`cal wheel <left|right>` requires DISARMED, saved CH4 calibration and recognized
+STOP, healthy neutral CH1/CH2, no failsafe and zero toe. Motor PWM stays safe and
+arming is inhibited. Only the selected servo follows physical CH1 through a
+direct PWM mapping within its saved endpoints/linkage caps; the other holds
+trimmed neutral. Toe/Ackermann/tank steering are bypassed during measurement.
+`cal capture` records commanded PWM and refreshes the 120-second inactivity timer.
+CH1/CH2 loss, throttle movement/failsafe, leaving recognized STOP, cancellation
+or timeout ends measurement and resets the arm cycle. Normal steering resumes.
+There is no HTTP command for selecting a servo PWM/angle. Finish measurement
+before saving; all configuration saves remain DISARMED-only/outside calibration.
+`config steering wheel <left|right> <max_left_deg> <max_right_deg> <pwm:angle>...`
+saves points, their endpoint PWM/angles and the explicitly reviewed requested
+maxima atomically. The UI previews reductions in maxima to fit both wheels;
+inconsistent toe or geometry is rejected. `<left|right> clear` removes measurements.
+
+Shared toe defaults to zero, configurable across the full calibrated/linkage
+range in road-wheel degrees per wheel, in 0.1-degree steps. There is no separate
+toe angle cap. Positive means toe-in: left +toe/right -toe, with positive
+wheel angles pointing right. Toe leaves endpoints and neutral trims fixed.
+It is added after the geometric blend and consumes the same calibrated/linkage
+travel; the steering components reduce together when the remaining travel binds.
+Validate that static toe fits both physical envelopes before applying any
+toe, trim, endpoint or linkage edit. Toe-in uses both outside envelopes; toe-out
+uses both inside envelopes. Each bound is the smaller of the two wheels' available
+road-wheel travel, rounded inward to 0.1 degree. A zero inside cap permits no
+toe-out; a zero outside cap permits no toe-in. Firmware reports the derived
+`steering_toe_range` to the monitor, which refreshes bounds without replacing drafts.
+`config steering toe <signed_degrees>` and the monitor save it under normal guards.
+
+Linkage travel limits are servo-shaft rotation from each trimmed neutral,
+shared by inside/outside wheel role: defaults 90/68 degrees, configurable
+0–90 degrees in 0.1-degree steps. With zero toe, either zero cap holds both wheels straight.
+Convert using the stated 180 degrees / 2000 us scale, rounding inward to whole
+microseconds; narrower calibrated endpoints and 500–2500 us always apply.
+Limit the inside road-wheel target and recompute the outside blend; if the
+outside cap binds, reduce the inside target using a bounded 20-step search.
+Never clip the two steering components independently and break their blend. Report
+the resulting limited model angles. Limits do not rewrite endpoint/trim
+calibration. `config steering linkage <inside_deg> <outside_deg>` and the
+monitor's Safe linkage travel form save both values together under normal
+configuration guards. These are commanded limits, not measured mechanical safety.
 
 Geometry is adjustable: wheelbase/front track 50–2000 mm, rear-wheel diameter
 10–500 mm, maximum requested left/right angles 1–85 degrees, all step 0.1.
@@ -165,9 +269,11 @@ speeds 0–300 km/h, strength 0–100%, one decimal. Linear interpolation, final
 value held above the last point; default (0,0)/(100,0). The inside wheel angle
 is normalized CH1 magnitude times the direction-specific maximum. Ideal outside
 angle is atan2(L*sin(inside), L*cos(inside)+T*sin(inside)), in radians. Outside
-blends from inside angle at 0% to ideal outside at 100%; inside stays fixed.
-Both centers remain exact at zero input. Sign selects the inside automatically;
-one curve covers both directions and reverse. No dynamic steering limiter,
+blends from inside angle at 0% to ideal outside at 100%; linkage caps may reduce
+both targets together, preserving the blend relationship.
+At zero input, zero toe produces exact trimmed neutrals; otherwise report the
+toe alignment. The ideal Ackermann relationship applies before toe is added. Sign selects the inside
+automatically; one curve covers both directions and reverse. No lateral-g steering limiter,
 IMU, torque vectoring or slip model participates. This replaces the old
 percentage-of-PWM reduction semantics, including its negative-value behavior.
 
@@ -180,6 +286,8 @@ RPM are equal for hub motors. PPR remains configurable 1–120; legacy even
 motor-pole input sets PPR to half poles. Quantization is ~85.7 RPM at 100 ms
 and ~17.1 RPM at 500 ms.
 
+In tank mode this unsigned RPM conversion is wheel surface speed, not vehicle
+translation; the monitor labels it accordingly. It does not feed Ackermann in tank.
 Armed RPM dropout retains last valid speed and reports held, not fresh.
 Disarmed missing RPM resets unavailable speed to zero. Before any valid
 estimate use the 0 km/h curve point. An armed stop after motion is also a
@@ -190,12 +298,22 @@ optical-tachometer checks.
 ## Configuration, network and storage
 
 Keep `cal` throttle/CH1/CH4 and active `cfg` keys backward compatible.
-New independent steering uses a validated 66-byte, versioned fixed-width
-`cfg/dual_steer_v2` blob. Validate length/version, PWM/angle calibration, geometry,
+Independent steering uses a validated 152-byte, versioned fixed-width
+`cfg/dual_steer_v6` blob (76-byte v5 prefix, then two 38-byte wheel calibrations:
+uint16_t count and nine {uint16_t PWM, int16_t angle} pairs). Angles use tenths
+of degrees. Valid v5 retains all prior fields and adds zero measured points;
+every older migration also starts unmeasured. Valid v4 retains
+all fields with zero toe. Valid v3 data retains every field with zero toe and
+default 90/68-degree linkage limits; valid v2 retains calibration, geometry and
+curve with zero trims and default linkage limits.
+Validate length/version, base/trimmed centers, toe against travel, PWM/angle calibration, geometry,
 travel limits and every point. A v1-only device preserves valid servo PWM
 endpoints but resets the old reduction curve to 0% parallel; new geometry/angles
-start at defaults. Never reinterpret the old curve. Invalid v2 uses defaults
-without falling back to stale v1. Keep migration read-only until a config save.
+start at defaults. Never reinterpret the old curve. A present invalid blob
+uses defaults, never an older version. Only a missing key permits checking
+v6 -> v5 -> v4 -> v3 -> v2 -> v1. Keep migration read-only until a config save writes v6.
+`cfg/drive_mode` adds TANK=3, preserving AWD/FWD/RWD values; `cfg/tank_limit`
+stores the independent uint8_t percentage. Missing/invalid tank limits use 25%.
 Do not migrate the removed steering table/trim into unmeasured dual servos.
 New curve/endpoints saves validate before apply and restore RAM on failure.
 Configuration remains DISARMED-only and unavailable during calibration.
@@ -261,7 +379,8 @@ steering or network behavior. Keep `docs/project_showcase_handoff.md` current
 for public project facts, validation status and generated media; include
 absolute copy-ready asset paths and describe simulated versus real evidence.
 
-Current physical gaps remain: new dual-servo directions/centers/endpoints,
+Current physical gaps remain: shared toe alignment and tank rotation/side reversal,
+new dual-servo directions/centers/endpoints,
 road-wheel angle calibration, geometric mixing and held-speed behavior; rear sensor wiring/accuracy;
 CH1/CH4 calibration and both latch policies; GPIO2 boot reliability;
 CPU-isolated/IRAM receiver capture and LEDC startup fixes during NVS writes;

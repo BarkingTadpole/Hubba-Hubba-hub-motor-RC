@@ -25,7 +25,14 @@
 #define DEFAULT_TRACK_TENTHS_MM 3200U
 /* Initial road-wheel angle assumptions; measure the new linkages before use. */
 #define DEFAULT_STEERING_ANGLE_TENTHS_DEG 300U
+/* Both mounts: higher PWM is CCW/wheel-left; lower PWM is CW/wheel-right.
+ * Start within the servo's full 500-2500 us rating until linkage travel is measured. */
+#define DEFAULT_SERVO_WHEEL_LEFT_US 2000U
+#define DEFAULT_SERVO_WHEEL_RIGHT_US 1000U
+#define DEFAULT_LINKAGE_INSIDE_TENTHS_DEG 900U
+#define DEFAULT_LINKAGE_OUTSIDE_TENTHS_DEG 680U
 #define DEFAULT_REVERSE_LIMIT_PERCENT 100U
+#define DEFAULT_TANK_LIMIT_PERCENT 25U
 #define DEFAULT_DRIVE_SMOOTHING_PERCENT 100U
 #define DEFAULT_STEERING_SMOOTHING_MS 10U
 #define DEFAULT_PERMANENT_ARM_LATCH_ENABLED 1

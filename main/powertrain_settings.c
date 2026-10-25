@@ -30,7 +30,7 @@ bool powertrain_set_drivetrain_mode(drivetrain_mode_t mode)
 {
     controller_lock();
     if (!configuration_is_allowed() || !drivetrain_mode_valid(mode)) {
-        printf("ERR: drivetrain mode must be AWD, FWD, or RWD while DISARMED\n");
+        printf("ERR: drivetrain mode must be AWD, FWD, RWD, or TANK while DISARMED\n");
         controller_unlock();
         return false;
     }
@@ -43,7 +43,28 @@ bool powertrain_set_drivetrain_mode(drivetrain_mode_t mode)
     bool saved = save_drive_config_or_report(message) == ESP_OK;
     if (!saved) {
         controller.drive_config.drivetrain_mode = previous_mode;
+    } else {
+        reset_drive_state();
+        powertrain_steering_recenter();
     }
+    controller_unlock();
+    return saved;
+}
+
+bool powertrain_set_tank_limit(uint8_t percent)
+{
+    controller_lock();
+    if (!configuration_is_allowed() || percent > 100) {
+        printf("ERR: tank limit must be 0-100 and changed while DISARMED\n");
+        controller_unlock();
+        return false;
+    }
+    uint8_t previous = controller.drive_config.tank_limit_percent;
+    controller.drive_config.tank_limit_percent = percent;
+    char message[80];
+    snprintf(message, sizeof(message), "OK: tank throttle limit set to %u%%", percent);
+    bool saved = save_drive_config_or_report(message) == ESP_OK;
+    if (!saved) controller.drive_config.tank_limit_percent = previous;
     controller_unlock();
     return saved;
 }
@@ -190,7 +211,7 @@ bool powertrain_set_steering_servo(uint8_t side, const steering_servo_config_t *
     controller_lock();
     if (!configuration_is_allowed() || side >= STEERING_SERVO_COUNT ||
         !steering_servo_config_valid(servo)) {
-        printf("ERR: servo endpoints must bracket center by at least 50 us, within 800-2200 us, while DISARMED\n");
+        printf("ERR: servo endpoints must bracket center by at least 50 us, within 500-2500 us, while DISARMED\n");
         controller_unlock();
         return false;
     }
@@ -198,8 +219,117 @@ bool powertrain_set_steering_servo(uint8_t side, const steering_servo_config_t *
     controller.drive_config.steering.servo[side] = *servo;
     bool saved = independent_steering_config_valid(&controller.drive_config.steering) &&
                  save_drive_config_or_report("OK: steering servo PWM/angle calibration saved") == ESP_OK;
-    if (!saved) printf("ERR: servo angles must cover both requested steering limits; configuration not changed\n");
+    if (!saved) printf("ERR: requested angles, trimmed neutral and toe must fit calibrated/linkage travel; configuration not changed\n");
     if (!saved) controller.drive_config.steering = previous;
+    controller_unlock();
+    return saved;
+}
+
+bool powertrain_set_wheel_calibration(uint8_t side, const wheel_angle_calibration_t *calibration,
+                                     uint16_t max_left, uint16_t max_right)
+{
+    controller_lock();
+    if (!configuration_is_allowed() || side >= STEERING_SERVO_COUNT || calibration == NULL ||
+        (calibration->count != 0 && (calibration->count < 3 || calibration->count > WHEEL_CALIBRATION_MAX_POINTS))) {
+        controller_unlock();
+        return false;
+    }
+    independent_steering_config_t previous = controller.drive_config.steering, next = previous;
+    next.wheel_calibration[side] = *calibration;
+    if (calibration->count > 0) {
+        const wheel_angle_point_t *first = &calibration->points[0], *last = &calibration->points[calibration->count - 1];
+        next.servo[side].left_us = first->pulse_us;
+        next.servo[side].right_us = last->pulse_us;
+        next.servo[side].left_tenths_deg = -first->angle_tenths_deg;
+        next.servo[side].right_tenths_deg = last->angle_tenths_deg;
+        next.geometry.max_left_tenths_deg = max_left;
+        next.geometry.max_right_tenths_deg = max_right;
+        /* Measurements cannot silently reverse the physical direction mapping. */
+        if ((next.servo[side].left_us > next.servo[side].right_us) !=
+            (previous.servo[side].left_us > previous.servo[side].right_us)) {
+            controller_unlock();
+            return false;
+        }
+    }
+    if (!independent_steering_config_valid(&next)) {
+        printf("ERR: wheel measurements must be monotonic, include trimmed neutral at 0 degrees, and fit geometry/toe\n");
+        controller_unlock();
+        return false;
+    }
+    controller.drive_config.steering = next;
+    bool saved = save_drive_config_or_report(calibration->count ? "OK: measured wheel calibration saved" :
+                                             "OK: wheel measurements cleared; endpoint approximation retained") == ESP_OK;
+    if (!saved) controller.drive_config.steering = previous;
+    controller_unlock();
+    return saved;
+}
+
+bool powertrain_set_steering_trim(uint8_t side, int16_t trim_us)
+{
+    controller_lock();
+    if (!configuration_is_allowed() || side >= STEERING_SERVO_COUNT) {
+        printf("ERR: select left/right servo trim while DISARMED and outside calibration\n");
+        controller_unlock();
+        return false;
+    }
+    independent_steering_config_t next = controller.drive_config.steering;
+    next.trim_us[side] = trim_us;
+    if (!independent_steering_config_valid(&next)) {
+        printf("ERR: center + trim must stay >=50 us inside endpoints and configured toe must fit linkage travel\n");
+        controller_unlock();
+        return false;
+    }
+    int16_t previous = controller.drive_config.steering.trim_us[side];
+    controller.drive_config.steering.trim_us[side] = trim_us;
+    char message[96];
+    snprintf(message, sizeof(message), "OK: %s servo trim set to %+d us (neutral %d us)",
+             side == STEERING_LEFT ? "left" : "right", (int)trim_us,
+             (int)next.servo[side].center_us + trim_us);
+    bool saved = save_drive_config_or_report(message) == ESP_OK;
+    if (!saved) controller.drive_config.steering.trim_us[side] = previous;
+    controller_unlock();
+    return saved;
+}
+
+bool powertrain_set_steering_linkage(const steering_linkage_limits_t *limits)
+{
+    controller_lock();
+    if (!configuration_is_allowed() || !steering_linkage_limits_valid(limits)) {
+        printf("ERR: linkage travel must be 0-90 degrees from trimmed neutral, while DISARMED and outside calibration\n");
+        controller_unlock();
+        return false;
+    }
+    independent_steering_config_t next = controller.drive_config.steering;
+    next.linkage = *limits;
+    if (!independent_steering_config_valid(&next)) {
+        printf("ERR: linkage limits must also contain configured toe; configuration not changed\n");
+        controller_unlock();
+        return false;
+    }
+    steering_linkage_limits_t previous = controller.drive_config.steering.linkage;
+    controller.drive_config.steering.linkage = *limits;
+    bool saved = save_drive_config_or_report("OK: inside/outside linkage travel limits saved") == ESP_OK;
+    if (!saved) controller.drive_config.steering.linkage = previous;
+    controller_unlock();
+    return saved;
+}
+
+bool powertrain_set_steering_toe(int16_t tenths_deg)
+{
+    controller_lock();
+    independent_steering_config_t next = controller.drive_config.steering;
+    next.toe_tenths_deg = tenths_deg;
+    if (!configuration_is_allowed() || !independent_steering_config_valid(&next)) {
+        printf("ERR: toe must fit both wheels' calibrated/linkage travel, while DISARMED\n");
+        controller_unlock();
+        return false;
+    }
+    int16_t previous = controller.drive_config.steering.toe_tenths_deg;
+    controller.drive_config.steering.toe_tenths_deg = tenths_deg;
+    char message[96];
+    snprintf(message, sizeof(message), "OK: toe set to %+.1f degrees per wheel (+in, -out)", tenths_deg / 10.0);
+    bool saved = save_drive_config_or_report(message) == ESP_OK;
+    if (!saved) controller.drive_config.steering.toe_tenths_deg = previous;
     controller_unlock();
     return saved;
 }

@@ -73,6 +73,7 @@ static UBaseType_t powertrain_stack_min_free_bytes;
 #define DRIVE_INHIBIT_THROTTLE_LOST (1U << 1)
 #define DRIVE_INHIBIT_THROTTLE_FAILSAFE (1U << 2)
 #define DRIVE_INHIBIT_CLI (1U << 3)
+#define DRIVE_INHIBIT_STEERING_LOST (1U << 4)
 
 void controller_lock(void)
 {
@@ -108,13 +109,6 @@ static void wait_for_next_period(TickType_t *last_wake,
         *last_wake = xTaskGetTickCount();
         vTaskDelay(1);
     }
-}
-
-static uint16_t reverse_pulse_for_direction(drive_direction_t direction)
-{
-    return direction == DRIVE_DIRECTION_REVERSE
-               ? esc_limits.reverse_high_us
-               : esc_limits.reverse_low_us;
 }
 
 bool pulse_is_on_endpoint_side(uint16_t pulse_us,
@@ -238,6 +232,7 @@ const char *drive_inhibit_reason(uint32_t flags)
     if ((flags & DRIVE_INHIBIT_THROTTLE_FAILSAFE) != 0) {
         return "configured throttle failsafe pulse";
     }
+    if ((flags & DRIVE_INHIBIT_STEERING_LOST) != 0) return "tank CH1 missing or filter warming up";
     return "none";
 }
 
@@ -340,6 +335,11 @@ static bool drive_arm_allowed(void)
                throttle.pulse_us, controller.throttle_cal.neutral_us, controller.throttle_cal.deadband_us);
         return false;
     }
+    if (controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK &&
+        !powertrain_steering_tank_neutral()) {
+        printf("ERR: tank mode requires valid, centered CH1 before arming\n");
+        return false;
+    }
     return true;
 }
 
@@ -396,7 +396,13 @@ static drive_command_t read_drive_command(void)
 
     float normalized = (float)input_delta / input_span;
     normalized *= normalized;
-    if (command.direction == DRIVE_DIRECTION_REVERSE) {
+    if (controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK) {
+        float steering;
+        if (!powertrain_steering_tank_command(&steering) || steering == 0.0f ||
+            controller.drive_config.tank_limit_percent > 100) return command;
+        command.direction = steering < 0.0f ? DRIVE_DIRECTION_TANK_LEFT : DRIVE_DIRECTION_TANK_RIGHT;
+        normalized *= (float)controller.drive_config.tank_limit_percent / 100.0f;
+    } else if (command.direction == DRIVE_DIRECTION_REVERSE) {
         normalized *= (float)controller.drive_config.reverse_limit_percent / 100.0f;
     }
 
@@ -410,11 +416,8 @@ static drive_command_t read_drive_command(void)
 static void set_drive_outputs(void)
 {
     wheel_output_command_t command;
-    for (size_t wheel = 0; wheel < POWERTRAIN_WHEEL_COUNT; wheel++) {
-        command.throttle_us[wheel] = current_base_throttle_us;
-        command.reverse_us[wheel] = reverse_pulse_for_direction(active_direction);
-    }
-    drivetrain_apply_output_mask(controller.drive_config.drivetrain_mode, &esc_limits, &command);
+    drivetrain_mix_outputs(controller.drive_config.drivetrain_mode, active_direction,
+                            current_base_throttle_us, &esc_limits, &command);
     esc_output_set_wheels(&command);
 }
 
@@ -444,6 +447,19 @@ static void update_drive_outputs(void)
     }
     clear_drive_inhibit(DRIVE_INHIBIT_THROTTLE_FAILSAFE);
 
+    bool tank = controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK;
+    float steering;
+    if (tank && !powertrain_steering_tank_command(&steering)) {
+        if (controller.drive_config.permanent_arm_latch_enabled) {
+            set_drive_inhibit(DRIVE_INHIBIT_STEERING_LOST,
+                              "WARN: tank CH1 unavailable; safe outputs active");
+        } else {
+            return_to_disarmed("WARN: tank CH1 unavailable; drive disarmed", true);
+        }
+        return;
+    }
+    clear_drive_inhibit(DRIVE_INHIBIT_STEERING_LOST);
+
     if (controller.drive_inhibit_flags != 0) {
         hold_drive_outputs_safe();
         return;
@@ -471,7 +487,7 @@ static void update_drive_outputs(void)
     if (drive_command.direction != active_direction) {
         if (pending_direction != drive_command.direction || direction_hold_until_us == 0) {
             pending_direction = drive_command.direction;
-            direction_hold_until_us = now_us + DIRECTION_CHANGE_HOLD_US;
+            direction_hold_until_us = tank ? 0 : now_us + DIRECTION_CHANGE_HOLD_US;
         }
 
         current_base_throttle_us = ramp_toward(current_base_throttle_us,
@@ -480,10 +496,16 @@ static void update_drive_outputs(void)
                                                    DRIVE_DECEL_STEP_US,
                                                    controller.drive_config.drive_smoothing_percent));
         set_drive_outputs();
+        /* Tank reverses one or both sides. Hold all throttles at minimum for
+         * 120 ms, then publish new directions at minimum before accelerating. */
+        if (tank && current_base_throttle_us == esc_limits.throttle_min_us && direction_hold_until_us == 0) {
+            direction_hold_until_us = now_us + DIRECTION_CHANGE_HOLD_US;
+        }
         if (now_us >= direction_hold_until_us &&
-            current_base_throttle_us == esc_limits.throttle_min_us) {
+            direction_hold_until_us != 0 && current_base_throttle_us == esc_limits.throttle_min_us) {
             active_direction = pending_direction;
             direction_hold_until_us = 0;
+            if (tank) set_drive_outputs();
         }
         return;
     }
@@ -617,7 +639,8 @@ static void handle_receiver_arm_control(void)
         }
     } else if (controller.arm_cycle_ready &&
                controller.system_state == SYSTEM_DISARMED && !controller.calibration_in_progress) {
-        if (!healthy_throttle || !throttle_is_neutral()) {
+        if (!healthy_throttle || !throttle_is_neutral() ||
+            (controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK && !powertrain_steering_tank_neutral())) {
             controller.arm_run_candidate_since_us = 0;
         } else if (controller.arm_run_candidate_since_us == 0) {
             controller.arm_run_candidate_since_us = now_us;

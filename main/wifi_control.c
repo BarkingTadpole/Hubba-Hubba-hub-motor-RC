@@ -19,11 +19,12 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "independent_steering.h"
 #include "powertrain_controller.h"
 #include "remote_command.h"
 
 #define TELEMETRY_BUFFER_SIZE 8192
-#define CONFIG_RESPONSE_BUFFER_SIZE 2048
+#define CONFIG_RESPONSE_BUFFER_SIZE 3072
 #define COMMAND_ERROR_SIZE 192
 #define HTTP_COMMAND_BODY_SIZE 512
 #define AP_IPV4_ADDRESS "192.168.4.1"
@@ -82,6 +83,8 @@ static const char *calibration_kind_name(powertrain_calibration_kind_t kind)
     case POWERTRAIN_CALIBRATION_STEERING: return "steering";
     case POWERTRAIN_CALIBRATION_ARM: return "arm";
     case POWERTRAIN_CALIBRATION_ESC: return "esc";
+    case POWERTRAIN_CALIBRATION_WHEEL_LEFT: return "wheel-left";
+    case POWERTRAIN_CALIBRATION_WHEEL_RIGHT: return "wheel-right";
     default: return "none";
     }
 }
@@ -118,30 +121,47 @@ static void json_append(json_builder_t *json, const char *format, ...)
 static void append_config(json_builder_t *json, const powertrain_remote_snapshot_t *snapshot)
 {
     const drive_config_t *c = &snapshot->config;
+    int16_t toe_min = 0, toe_max = 0;
+    independent_steering_toe_range(&c->steering, &toe_min, &toe_max);
     json_append(json, "{\"loaded_from_nvs\":%s,\"reverse_limit_percent\":%u,"
+                "\"tank_limit_percent\":%u,\"steering_toe_deg\":%.1f,"
+                "\"steering_toe_range\":{\"min_deg\":%.1f,\"max_deg\":%.1f},"
                 "\"drive_smoothing_percent\":%u,\"failsafe_enabled\":%s,\"failsafe_us\":%u,"
                 "\"failsafe_window_us\":%u,\"motor_poles\":%u,\"rpm_ppr\":%u,"
                 "\"steering_smoothing_ms\":%u,\"permanent_arm_latch\":%s,"
                 "\"servos\":[",
-                bool_json(c->loaded_from_nvs), c->reverse_limit_percent, c->drive_smoothing_percent,
+                bool_json(c->loaded_from_nvs), c->reverse_limit_percent,
+                c->tank_limit_percent, c->steering.toe_tenths_deg / 10.0,
+                toe_min / 10.0, toe_max / 10.0, c->drive_smoothing_percent,
                 bool_json(c->receiver_failsafe_enabled), c->receiver_failsafe_us,
                 c->receiver_failsafe_window_us, c->motor_poles, c->rpm_pulses_per_revolution,
                 c->steering_smoothing_ms, bool_json(c->permanent_arm_latch_enabled));
     for (size_t i = 0; i < STEERING_SERVO_COUNT; i++) {
         const steering_servo_config_t *servo = &c->steering.servo[i];
-        json_append(json, "%s{\"left_us\":%u,\"center_us\":%u,\"right_us\":%u,\"left_angle_deg\":%.1f,\"right_angle_deg\":%.1f}",
+        json_append(json, "%s{\"left_us\":%u,\"center_us\":%u,\"right_us\":%u,\"trim_us\":%d,\"left_angle_deg\":%.1f,\"right_angle_deg\":%.1f,\"wheel_points\":[",
                     i ? "," : "", servo->left_us, servo->center_us, servo->right_us,
+                    (int)c->steering.trim_us[i],
                     servo->left_tenths_deg / 10.0, servo->right_tenths_deg / 10.0);
+        const wheel_angle_calibration_t *cal = &c->steering.wheel_calibration[i];
+        for (uint16_t p = 0; p < cal->count && p < WHEEL_CALIBRATION_MAX_POINTS; p++) {
+            json_append(json, "%s{\"pwm_us\":%u,\"angle_deg\":%.1f}", p ? "," : "",
+                        cal->points[p].pulse_us, cal->points[p].angle_tenths_deg / 10.0);
+        }
+        json_append(json, "]}");
     }
     const steering_geometry_t *g = &c->steering.geometry;
+    const steering_linkage_limits_t *linkage = &c->steering.linkage;
     const steering_calibration_t *input = &snapshot->steering_calibration;
     json_append(json, "],\"steering_geometry\":{\"wheelbase_mm\":%.1f,\"track_width_mm\":%.1f,"
                 "\"wheel_diameter_mm\":%.1f,\"max_left_deg\":%.1f,\"max_right_deg\":%.1f},"
+                "\"steering_linkage\":{\"inside_deg\":%.1f,\"outside_deg\":%.1f},"
                 "\"steering_input\":{\"left_us\":%u,\"center_us\":%u,\"right_us\":%u,\"deadband_us\":%u},"
                 "\"ackermann_strength_points\":[",
                 g->wheelbase_tenths_mm / 10.0, g->track_tenths_mm / 10.0,
                 g->wheel_diameter_tenths_mm / 10.0, g->max_left_tenths_deg / 10.0,
-                g->max_right_tenths_deg / 10.0, input->left_us, input->center_us, input->right_us, input->deadband_us);
+                g->max_right_tenths_deg / 10.0,
+                linkage->inside_tenths_deg / 10.0, linkage->outside_tenths_deg / 10.0,
+                input->left_us, input->center_us, input->right_us, input->deadband_us);
     for (uint16_t i = 0; i < c->steering.point_count && i < ACKERMANN_MAX_POINTS; i++) {
         json_append(json, "%s{\"speed_kmh\":%.1f,\"percent\":%.1f}", i ? "," : "",
                     c->steering.points[i].speed_tenths_kmh / 10.0,
@@ -163,7 +183,7 @@ static int format_telemetry(char *buffer, size_t buffer_size)
                 "\"inhibited\":%s,\"inhibit_flags\":%lu,\"inhibit_count\":%lu,"
                 "\"initial_arm_cycle_ready\":%s,\"drive_mode\":\"%s\","
                 "\"calibration\":{\"active\":%s,\"sampling\":%s,\"kind\":\"%s\","
-                "\"step\":%u,\"total_steps\":%u,\"values_us\":[%u,%u,%u],\"prompt\":\"%s\",\"message\":\"%s\"},\"rc\":{",
+                "\"step\":%u,\"total_steps\":%u,\"values_us\":[%u,%u,%u],\"wheel_capture_sequence\":%lu,\"prompt\":\"%s\",\"message\":\"%s\"},\"rc\":{",
                 (long long)(snapshot.captured_at_us / 1000), system_state_name(snapshot.state),
                 bool_json(snapshot.state == SYSTEM_DRIVE_ARMED), bool_json(snapshot.drive_inhibit_flags != 0),
                 (unsigned long)snapshot.drive_inhibit_flags, (unsigned long)snapshot.drive_inhibit_count,
@@ -171,7 +191,8 @@ static int format_telemetry(char *buffer, size_t buffer_size)
                 bool_json(snapshot.calibration_active), bool_json(snapshot.calibration_sampling),
                 calibration_kind_name(snapshot.calibration_kind), snapshot.calibration_step,
                 snapshot.calibration_total_steps, snapshot.calibration_values_us[0],
-                snapshot.calibration_values_us[1], snapshot.calibration_values_us[2], prompt, message);
+                snapshot.calibration_values_us[1], snapshot.calibration_values_us[2],
+                (unsigned long)snapshot.wheel_capture_sequence, prompt, message);
     const rc_channel_sample_t *channels[] = {&snapshot.throttle_input, &snapshot.steering_input, &snapshot.arm_input};
     const char *names[] = {"throttle", "steering", "arm"};
     for (size_t i = 0; i < 3; i++) {
@@ -320,6 +341,10 @@ static const char *command_result_message(const remote_command_t *command,
 {
     bool disarm_request = command->operation == REMOTE_DISARM_FOR_CONFIG;
     bool calibration_request = command->operation >= REMOTE_CALIBRATE_THROTTLE;
+    if (!applied && command->operation == REMOTE_CONFIG_WHEEL_CALIBRATION)
+        return "wheel calibration rejected: finish measurement mode, verify monotonic points, 0 degrees at trimmed neutral, steering maxima and toe travel";
+    if (!applied && (command->operation == REMOTE_CONFIG_STEERING_TRIM || command->operation == REMOTE_CONFIG_STEERING_SERVO))
+        return "servo change rejected: check DISARMED, endpoints, trim and toe; clear this wheel's measured calibration before changing its neutral or endpoints";
     if (applied) {
         if (disarm_request) {
             return "drive disarmed for configuration; physical STOP-to-RUN required";

@@ -22,6 +22,35 @@ typedef struct {
 static int32_t steering_filtered_q16;
 static steering_input_filter_t steering_input_filter;
 static steering_telemetry_t steering_telemetry;
+static bool steering_input_valid;
+
+bool powertrain_steering_tank_command(float *command)
+{
+    rc_channel_sample_t sample;
+    *command = 0.0f;
+    if (!steering_input_valid || throttle_matches_failsafe() ||
+        !rc_input_get(RC_CHANNEL_STEERING, &sample)) return false;
+    /* Do not keep a previous spin through raw center or a direction crossing.
+     * A new direction still needs the median filter's confirmation. */
+    if (abs((int)sample.pulse_us - controller.steering_cal.center_us) > controller.steering_cal.deadband_us &&
+        ((steering_telemetry.command > 0.0f && pulse_is_on_endpoint_side(sample.pulse_us,
+            controller.steering_cal.right_us, controller.steering_cal.center_us)) ||
+         (steering_telemetry.command < 0.0f && pulse_is_on_endpoint_side(sample.pulse_us,
+            controller.steering_cal.left_us, controller.steering_cal.center_us)))) {
+        *command = steering_telemetry.command;
+    }
+    return true;
+}
+
+bool powertrain_steering_tank_neutral(void)
+{
+    rc_channel_sample_t sample;
+    float command;
+    return powertrain_steering_tank_command(&command) && command == 0.0f &&
+           steering_telemetry.command == 0.0f &&
+           rc_input_get(RC_CHANNEL_STEERING, &sample) &&
+           abs((int)sample.pulse_us - controller.steering_cal.center_us) <= controller.steering_cal.deadband_us;
+}
 
 static uint16_t clamp_steering_pulse(int32_t pulse_us)
 {
@@ -51,8 +80,8 @@ static void update_vehicle_speed_estimate(void)
                                     controller.system_state == SYSTEM_DRIVE_ARMED;
     if (measured) steering_telemetry.vehicle_speed_mps = speed_mps;
     else if (!steering_telemetry.speed_held) steering_telemetry.vehicle_speed_mps = 0.0f;
-    steering_telemetry.ackermann_strength_percent = ackermann_strength_percent(
-        &controller.drive_config.steering, steering_telemetry.vehicle_speed_mps * 3.6f);
+    steering_telemetry.ackermann_strength_percent = controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK
+        ? 0.0f : ackermann_strength_percent(&controller.drive_config.steering, steering_telemetry.vehicle_speed_mps * 3.6f);
 }
 
 void powertrain_steering_update(void)
@@ -83,7 +112,10 @@ void powertrain_steering_update(void)
 
     update_vehicle_speed_estimate();
     int32_t target_q16 = (int32_t)target_us << 16;
-    if (!input_valid || controller.drive_config.steering_smoothing_ms == 0) {
+    steering_input_valid = input_valid;
+    int measurement_side = powertrain_calibration_wheel_side();
+    bool tank = controller.drive_config.drivetrain_mode == DRIVETRAIN_TANK && measurement_side < 0;
+    if (!input_valid || tank || controller.drive_config.steering_smoothing_ms == 0) {
         steering_filtered_q16 = target_q16;
     } else {
         int32_t difference_q16 = target_q16 - steering_filtered_q16;
@@ -102,8 +134,21 @@ void powertrain_steering_update(void)
     int32_t span = abs((int32_t)(right ? controller.steering_cal.right_us : controller.steering_cal.left_us) -
                        controller.steering_cal.center_us);
     steering_telemetry.command = span > 0 ? (float)abs(delta) / span * (right ? 1.0f : -1.0f) : 0.0f;
+    if (tank) {
+        float command;
+        powertrain_steering_tank_command(&command);
+        steering_telemetry.command = command;
+    }
     uint16_t pulses[STEERING_SERVO_COUNT];
-    independent_steering_mix(&controller.drive_config.steering, steering_telemetry.command,
+    if (measurement_side >= 0) {
+        independent_steering_measurement_pulses(&controller.drive_config.steering, measurement_side,
+                                               input_valid ? steering_telemetry.command : 0.0f, pulses);
+        steering_telemetry.angle_deg[0] = steering_telemetry.angle_deg[1] = 0.0f;
+        steering_telemetry.ackermann_strength_percent = 0.0f;
+        servo_output_set_pulses(pulses);
+        return;
+    }
+    independent_steering_mix(&controller.drive_config.steering, tank ? 0.0f : steering_telemetry.command,
                              steering_telemetry.ackermann_strength_percent, pulses, steering_telemetry.angle_deg);
     servo_output_set_pulses(pulses);
 }
@@ -112,6 +157,7 @@ void powertrain_steering_recenter(void)
 {
     steering_filtered_q16 = (int32_t)controller.steering_cal.center_us << 16;
     steering_input_filter_reset(&steering_input_filter);
+    steering_input_valid = false;
     uint16_t centers[STEERING_SERVO_COUNT];
     independent_steering_mix(&controller.drive_config.steering, 0.0f, 0.0f, centers, steering_telemetry.angle_deg);
     steering_telemetry.command = 0.0f;
@@ -120,6 +166,8 @@ void powertrain_steering_recenter(void)
 
 void powertrain_steering_init(void)
 {
+    steering_telemetry = (steering_telemetry_t){0};
+    steering_input_valid = false;
     steering_input_filter_init(&steering_input_filter);
     steering_filtered_q16 = (int32_t)controller.steering_cal.center_us << 16;
 }

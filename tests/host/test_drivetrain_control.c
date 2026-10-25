@@ -81,6 +81,29 @@ static void test_drive_smoothing_scales_both_ramps(void)
     CHECK(drivetrain_ramp_step_us(12, 101) == 12);
 }
 
+static void test_tank_mixing(void)
+{
+    wheel_output_command_t command;
+    CHECK(drivetrain_mode_valid(DRIVETRAIN_TANK));
+    for (int direction = DRIVE_DIRECTION_TANK_LEFT; direction <= DRIVE_DIRECTION_TANK_RIGHT; direction++) {
+        CHECK(drivetrain_mix_outputs(DRIVETRAIN_TANK, direction, 1310, &limits, &command));
+        for (unsigned wheel = 0; wheel < POWERTRAIN_WHEEL_COUNT; wheel++) {
+            bool left = wheel == WHEEL_FRONT_LEFT || wheel == WHEEL_REAR_LEFT;
+            bool reverse = direction == DRIVE_DIRECTION_TANK_LEFT ? left : !left;
+            CHECK(command.throttle_us[wheel] == 1310);
+            CHECK(command.reverse_us[wheel] == (reverse ? 1940 : 1100));
+        }
+    }
+    const int modes[] = {DRIVETRAIN_AWD,DRIVETRAIN_TANK,99,DRIVETRAIN_TANK,DRIVETRAIN_TANK};
+    const int directions[] = {DRIVE_DIRECTION_TANK_LEFT,DRIVE_DIRECTION_FORWARD,DRIVE_DIRECTION_TANK_RIGHT,99,DRIVE_DIRECTION_TANK_RIGHT};
+    for (unsigned i = 0; i < sizeof(modes)/sizeof(modes[0]); i++) {
+        CHECK(!drivetrain_mix_outputs(modes[i], directions[i], i == 4 ? 1941 : 1310, &limits, &command));
+        for (unsigned wheel = 0; wheel < POWERTRAIN_WHEEL_COUNT; wheel++) {
+            CHECK(command.throttle_us[wheel] == 1100 && command.reverse_us[wheel] == 1100);
+        }
+    }
+}
+
 int main(void)
 {
     test_awd_keeps_all_outputs();
@@ -88,5 +111,6 @@ int main(void)
     test_rwd_safes_front_axle();
     test_invalid_mode_safes_every_output();
     test_drive_smoothing_scales_both_ramps();
+    test_tank_mixing();
     return 0;
 }
