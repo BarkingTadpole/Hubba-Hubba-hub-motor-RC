@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "powertrain_controller.c"
 #include "cli.c"
+#include "steering_limit.h"
 
 static int64_t now = 1000000;
 static int lock_depth;
@@ -56,10 +57,10 @@ esp_err_t rpm_sensor_init(uint16_t ppr) { fake_rpm.pulses_per_revolution = ppr; 
 void rpm_sensor_set_pulses_per_revolution(uint16_t ppr) { fake_rpm.pulses_per_revolution = ppr; }
 void rpm_sensor_get_snapshot(rpm_snapshot_t *sample) { *sample = fake_rpm; }
 void rpm_sensor_update(void) {}
-esp_err_t servo_output_init(const uint16_t *centers)
+esp_err_t servo_output_init(const uint16_t centers[STEERING_SERVO_COUNT])
 { memcpy(servo_pwm, centers, sizeof(servo_pwm)); return ESP_OK; }
-void servo_output_set_pulses(const uint16_t *pulses) { memcpy(servo_pwm, pulses, sizeof(servo_pwm)); }
-void servo_output_get_pulses(uint16_t *pulses) { memcpy(pulses, servo_pwm, sizeof(servo_pwm)); }
+void servo_output_set_pulses(const uint16_t pulses[STEERING_SERVO_COUNT]) { memcpy(servo_pwm, pulses, sizeof(servo_pwm)); }
+void servo_output_get_pulses(uint16_t pulses[STEERING_SERVO_COUNT]) { memcpy(pulses, servo_pwm, sizeof(servo_pwm)); }
 void esc_output_set_all(uint16_t throttle, uint16_t reverse)
 {
     for (int i = 0; i < POWERTRAIN_WHEEL_COUNT; i++) {
@@ -86,6 +87,7 @@ void config_store_load_drive(drive_config_t *config)
         .receiver_failsafe_enabled=true,.receiver_failsafe_us=1565,.receiver_failsafe_window_us=10,
         .motor_poles=14,.rpm_pulses_per_revolution=7,.permanent_arm_latch_enabled=true};
     independent_steering_defaults(&config->steering);
+    steering_limit_defaults(&config->steering_limit);
     config->steering.trim_us[0] = 25;
     config->steering.trim_us[1] = -35;
     config->steering.toe_tenths_deg = 30;
@@ -98,6 +100,22 @@ esp_err_t config_store_save_steering(const steering_calibration_t *cal)
 { (void)cal; return save_fails ? ESP_FAIL : ESP_OK; }
 esp_err_t config_store_save_arm(const arm_calibration_t *cal)
 { (void)cal; return save_fails ? ESP_FAIL : ESP_OK; }
+
+void config_store_load_bundle(configuration_bundle_t *bundle)
+{
+    if (controller.drive_config.rpm_pulses_per_revolution == 0) {
+        config_store_load_throttle(&bundle->throttle);
+        config_store_load_steering(&bundle->input);
+        config_store_load_arm(&bundle->arm);
+        config_store_load_drive(&bundle->drive);
+        return;
+    }
+    *bundle = (configuration_bundle_t){controller.throttle_cal,controller.steering_cal,
+        controller.arm_cal,controller.drive_config};
+}
+
+esp_err_t config_store_save_bundle(const configuration_bundle_t *bundle)
+{ assert(lock_depth > 0 && configuration_bundle_valid(bundle)); return save_fails ? ESP_FAIL : ESP_OK; }
 
 static void tick(uint32_t elapsed_ms)
 {
@@ -393,6 +411,7 @@ static void test_shared_commands(void)
         "config steering trim left 25", "config steering trim right -35",
         "config steering linkage 88.5 67.5",
         "config steering ackermann-strength 0:60 30:20 100:10",
+        "config steering limit 0:100 40:65.5 80:35",
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
         controller.drive_config = original;
@@ -732,6 +751,127 @@ static void test_wheel_calibration(void)
     powertrain_steering_recenter();
 }
 
+static void test_speed_steering_limit(void)
+{
+    drive_config_t original = controller.drive_config;
+    rpm_snapshot_t original_rpm = fake_rpm;
+    controller.system_state = SYSTEM_DISARMED;
+    controller.calibration_in_progress = false;
+    independent_steering_defaults(&controller.drive_config.steering);
+    controller.drive_config.steering_smoothing_ms = 0;
+    const steering_limit_point_t points[] = {{0,1000},{400,600},{800,200}};
+    for (int i = 0; i < STEERING_SERVO_COUNT; i++) {
+        controller.drive_config.steering.wheel_calibration[i] = (wheel_angle_calibration_t){
+            5,{{2000,-300},{1750,-100},{1500,0},{1200,80},{1000,300}}};
+    }
+    assert(independent_steering_config_valid(&controller.drive_config.steering));
+    assert(powertrain_set_steering_limit_curve(points, 3));
+    steering_limit_config_t saved = controller.drive_config.steering_limit;
+    assert(!powertrain_set_steering_limit_curve(NULL, 3));
+    assert(!powertrain_set_steering_limit_curve(points, 9));
+    assert(!powertrain_set_steering_limit_curve(points, 1));
+    save_fails = true;
+    assert(!powertrain_set_steering_limit_curve((steering_limit_point_t[]){{0,0},{100,0}}, 2));
+    save_fails = false;
+    assert(memcmp(&saved, &controller.drive_config.steering_limit, sizeof(saved)) == 0);
+    controller.calibration_in_progress = true;
+    assert(!powertrain_set_steering_limit_curve(points, 3));
+    controller.calibration_in_progress = false;
+    controller.system_state = SYSTEM_DRIVE_ARMED;
+    assert(!powertrain_set_steering_limit_curve(points, 3));
+    controller.system_state = SYSTEM_DISARMED;
+    controller.drive_config.steering.points[0].strength_tenths_percent = 1000;
+    controller.drive_config.steering.points[1].strength_tenths_percent = 1000;
+    inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
+    inputs[RC_CHANNEL_ARM] = (rc_channel_sample_t){2049,now,true};
+    float rpm = (60.0f / 3.6f) * 60.0f / (3.141592653589793f * .107f);
+    fake_rpm = (rpm_snapshot_t){.rpm={rpm,rpm},.valid={true,true},.updated_at_us=now};
+    powertrain_steering_recenter();
+    frame(2050); frame(2050); frame(2050);
+    powertrain_remote_snapshot_t s = snapshot();
+    assert(s.vehicle_speed_valid && fabsf(s.steering_limit_percent - 40) < .001f);
+    assert(fabsf(s.steering_command + 1) < .001f && fabsf(s.steering_limited_command + .4f) < .001f);
+    assert(fabsf(s.steering_angle_deg[0] + 12) < .001f);
+    assert(servo_pwm[0] == 1775); // Measured nonlinear mapping is still used after scaling.
+    float inside = -s.steering_angle_deg[0] * .017453292519943295f;
+    float outside = -s.steering_angle_deg[1] * .017453292519943295f;
+    assert(fabsf(1/tanf(outside) - 1/tanf(inside) - 320.0f/445.0f) < .001f);
+    fake_rpm.updated_at_us = now;
+    frame(1784); frame(1784); frame(1784); // Half left input -> 20% command.
+    assert(fabsf(snapshot().steering_limited_command + .2f) < .001f);
+    fake_rpm.updated_at_us = now;
+    frame(987); frame(987); frame(987);
+    assert(fabsf(snapshot().steering_limited_command - .4f) < .001f);
+    assert(fabsf(snapshot().steering_angle_deg[1] - 12) < .001f);
+    controller.system_state = SYSTEM_DRIVE_ARMED;
+    tick(110); // Held speed continues for Ackermann; limit must bypass.
+    assert(snapshot().vehicle_speed_held && snapshot().steering_limit_percent == 100);
+    assert(fabsf(snapshot().steering_limited_command - 1) < .001f);
+    fake_rpm.updated_at_us = now; fake_rpm.valid[1] = false; tick(20);
+    assert(snapshot().steering_limit_percent == 100);
+    fake_rpm.valid[1] = true; fake_rpm.updated_at_us = now; tick(20);
+    assert(fabsf(snapshot().steering_limit_percent - 40) < .001f);
+    controller.system_state = SYSTEM_DISARMED;
+    controller.drive_config.drivetrain_mode = DRIVETRAIN_TANK;
+    tick(20);
+    assert(snapshot().steering_limit_percent == 100 && snapshot().steering_limited_command == 0);
+    controller.drive_config.drivetrain_mode = DRIVETRAIN_AWD;
+    assert(powertrain_set_steering_limit_curve((steering_limit_point_t[]){{0,0},{1000,0}}, 2));
+    assert(powertrain_set_steering_toe(30));
+    fake_rpm.updated_at_us = now; tick(20);
+    assert(snapshot().steering_limit_percent == 0 && snapshot().steering_limited_command == 0);
+    assert(snapshot().steering_angle_deg[0] == 3 && snapshot().steering_angle_deg[1] == -3);
+    controller.drive_config = original;
+    fake_rpm = original_rpm;
+    powertrain_steering_recenter();
+    safe_outputs();
+}
+
+static void test_configuration_transfer(void)
+{
+    controller.system_state = SYSTEM_DISARMED;
+    configuration_bundle_t before;
+    config_store_load_bundle(&before);
+    uint8_t data[CONFIG_BACKUP_SIZE];
+    assert(powertrain_export_configuration(data,sizeof(data)));
+    configuration_bundle_t backup;
+    assert(config_backup_decode(data,sizeof(data),&backup));
+    backup.drive.drivetrain_mode = DRIVETRAIN_RWD;
+    backup.drive.tank_limit_percent = 42;
+    backup.drive.rpm_pulses_per_revolution = 9;
+    assert(config_backup_encode(&backup,data,sizeof(data)));
+    controller.system_state = SYSTEM_DRIVE_ARMED;
+    assert(!powertrain_import_configuration(data,sizeof(data)));
+    assert(!powertrain_export_configuration(data,sizeof(data)));
+    controller.system_state = SYSTEM_DISARMED;
+    controller.calibration_in_progress = true;
+    assert(!powertrain_import_configuration(data,sizeof(data)));
+    assert(!powertrain_export_configuration(data,sizeof(data)));
+    controller.calibration_in_progress = false;
+    save_fails = true;
+    assert(!powertrain_import_configuration(data,sizeof(data)));
+    assert(controller.drive_config.tank_limit_percent == before.drive.tank_limit_percent);
+    save_fails = false;
+    data[50] ^= 1;
+    assert(!powertrain_import_configuration(data,sizeof(data)));
+    data[50] ^= 1;
+    controller.arm_cycle_ready = true;
+    controller.arm_run_candidate_since_us = now;
+    assert(powertrain_import_configuration(data,sizeof(data)));
+    assert(controller.system_state == SYSTEM_DISARMED && !controller.arm_cycle_ready);
+    assert(controller.arm_run_candidate_since_us == 0);
+    assert(controller.drive_config.drivetrain_mode == DRIVETRAIN_RWD && controller.drive_config.tank_limit_percent == 42);
+    assert(fake_rpm.pulses_per_revolution == 9);
+    assert(memcmp(&controller.drive_config.steering,&backup.drive.steering,sizeof(backup.drive.steering)) == 0);
+    safe_outputs();
+    backup.throttle.loaded_from_nvs = false; backup.arm.loaded_from_nvs = false;
+    assert(config_backup_encode(&backup,data,sizeof(data)) && powertrain_import_configuration(data,sizeof(data)));
+    assert(!controller.throttle_cal.loaded_from_nvs && !controller.arm_cal.loaded_from_nvs);
+    controller.throttle_cal = before.throttle; controller.steering_cal = before.input;
+    controller.arm_cal = before.arm; controller.drive_config = before.drive;
+    powertrain_steering_recenter();
+}
+
 int main(void)
 {
     inputs[RC_CHANNEL_THROTTLE] = (rc_channel_sample_t){1514,now,true};
@@ -752,6 +892,8 @@ int main(void)
     test_tank_mode();
     test_calibration_workflows();
     test_wheel_calibration();
+    test_speed_steering_limit();
+    test_configuration_transfer();
     assert(lock_depth == 0);
     puts("Controller modules passed: steering/toe/speed, config rollback, normal/tank outputs and limits, arming/failsafes, direction holds, calibration/cancel/timeouts and snapshots.");
 }

@@ -25,6 +25,7 @@ typedef enum {
     REMOTE_CONFIG_STEERING_GEOMETRY,
     REMOTE_CONFIG_STEERING_INPUT,
     REMOTE_CONFIG_ACKERMANN,
+    REMOTE_CONFIG_STEERING_LIMIT,
     REMOTE_CONFIG_ARM_LATCH,
     REMOTE_CALIBRATE_THROTTLE,
     REMOTE_CALIBRATE_STEERING,
@@ -53,6 +54,7 @@ typedef struct {
     steering_calibration_t steering_input;
     uint16_t point_count;
     ackermann_point_t points[ACKERMANN_MAX_POINTS];
+    steering_limit_config_t steering_limit;
 } remote_command_t;
 
 bool remote_command_parse(const char *line,

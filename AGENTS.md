@@ -277,6 +277,27 @@ automatically; one curve covers both directions and reverse. No lateral-g steeri
 IMU, torque vectoring or slip model participates. This replaces the old
 percentage-of-PWM reduction semantics, including its negative-value behavior.
 
+The steering-limit graph independently scales normalized, filtered CH1 before
+Ackermann mixing: limited_command = input * range_percent / 100. Full input at
+60% requests 60% of that direction's configured maximum; half input requests
+30%. Keep the existing coupled travel limits and add toe afterward. Calibration,
+trims and endpoints stay fixed. Tank and wheel measurement bypass the limiter.
+Use 2-8 speed/range points, first speed zero, strictly ascending 0-300 km/h,
+percentages 0-100, one decimal; linear interpolation and final-value hold.
+Defaults (0,100)/(100,100) preserve full steering until explicitly saved.
+Per explicit user request, missing/invalid/stale rear RPM DISABLES the limiter
+and restores 100% immediately, including held speed; valid speed resumes it.
+Ackermann retains its existing held-speed behavior. Do not substitute a minimum
+curve value or last-limit hold for the user's requested bypass policy.
+`config steering limit <speed:percent>...` and the monitor editor share normal
+DISARMED/outside-calibration guards and failed-save rollback. Persist separately
+in the validated fixed-width 36-byte cfg/steer_limit_v1 blob (version/count,
+eight speed/range uint16 pairs); missing/invalid data uses flat 100%. Preserve
+dual_steer_v6 and every measured calibration. Protocol 3 adds steering
+limited_command/limit_percent and config.steering_limit_points. Live identifies
+the applied range and bypass states; graph drafts survive polling/navigation.
+This is a user-defined steering range, not the removed lateral-g limiter.
+
 Rear RPM uses two PCNT units, rising edges only, 7 PPR (user scope-count
 confirmed on 2026-08-12 for the tested motor/sensor). Keep 20 ms sampling,
 5–25-sample adaptive windows until four edges, 250 ms no-edge invalidation.
@@ -317,6 +338,25 @@ stores the independent uint8_t percentage. Missing/invalid tank limits use 25%.
 Do not migrate the removed steering table/trim into unmeasured dual servos.
 New curve/endpoints saves validate before apply and restore RAM on failure.
 Configuration remains DISARMED-only and unavailable during calibration.
+
+RC Monitor Settings has Configuration backup: download a 250-byte versioned
+.rcconfig file from saved NVS, validate/preview a selected file, then import the
+complete vehicle setup while DISARMED/outside calibration. Include CH2/CH1/CH4
+calibration and saved flags, all drive settings, measured wheel points, geometry,
+toe/trims/linkage, Ackermann and steering-limit curves. Exclude live arming/latch
+state, outputs, firmware GPIO/Wi-Fi credentials and retired NVS features.
+The fixed little-endian file checks magic/version/length, CRC32 and every field
+before applying. An import saves one authoritative cfg/profile_v1 record first;
+compatibility mirrors retain existing cal/cfg key types. Ordinary subsequent
+saves update the complete profile and the affected legacy keys. A failed mirror
+warns but the complete profile remains authoritative. Missing profile uses the
+existing migrations; a present invalid profile uses uncalibrated defaults, never
+a mixture of legacy keys. Startup loads the bundle once. Import applies RAM only
+after the record save succeeds, holds safe ESC outputs, refreshes RPM conversion,
+resets steering history and arm qualification, and requires physical STOP-to-RUN.
+It does not initialize/erase NVS or flash firmware. Keep writes outside drive
+loops. HTTP /api/config/backup (GET), /preview and /import (POST, under
+/api/config) accept only the bounded backup format; no arbitrary NVS/CLI access.
 
 USB CLI 115200. Commands and calibration procedure are in README/architecture.
 Monitor duration 30 seconds. Browser receiver captures use structured

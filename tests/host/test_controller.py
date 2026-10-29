@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as directory:
     executable = temp / 'test_controller'
     modules = ['powertrain_commands', 'remote_command', 'powertrain_calibration', 'powertrain_settings', 'powertrain_diagnostics',
                'powertrain_steering', 'independent_steering', 'steering_input_filter',
-               'cornering_control', 'drivetrain_control']
+               'cornering_control', 'drivetrain_control', 'steering_limit', 'config_backup']
     subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=c11', '-Wall', '-Wextra', '-Werror',
                     '-I', str(temp), '-I', str(ROOT/'main'), '-I', str(ROOT/'main/include'),
                     str(ROOT/'tests/host/test_controller.c'),

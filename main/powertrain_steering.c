@@ -9,12 +9,15 @@
 #include "rpm_sensor.h"
 #include "servo_output.h"
 #include "steering_input_filter.h"
+#include "steering_limit.h"
 
 typedef struct {
     bool speed_valid;
     bool speed_held;
     float vehicle_speed_mps;
     float command;
+    float limited_command;
+    float limit_percent;
     float ackermann_strength_percent;
     float angle_deg[STEERING_SERVO_COUNT];
 } steering_telemetry_t;
@@ -140,7 +143,10 @@ void powertrain_steering_update(void)
         steering_telemetry.command = command;
     }
     uint16_t pulses[STEERING_SERVO_COUNT];
+    steering_telemetry.limit_percent = 100.0f;
+    steering_telemetry.limited_command = tank ? 0.0f : steering_telemetry.command;
     if (measurement_side >= 0) {
+        steering_telemetry.limited_command = 0.0f;
         independent_steering_measurement_pulses(&controller.drive_config.steering, measurement_side,
                                                input_valid ? steering_telemetry.command : 0.0f, pulses);
         steering_telemetry.angle_deg[0] = steering_telemetry.angle_deg[1] = 0.0f;
@@ -148,7 +154,12 @@ void powertrain_steering_update(void)
         servo_output_set_pulses(pulses);
         return;
     }
-    independent_steering_mix(&controller.drive_config.steering, tank ? 0.0f : steering_telemetry.command,
+    if (!tank) {
+        steering_telemetry.limit_percent = steering_limit_percent(&controller.drive_config.steering_limit,
+            steering_telemetry.vehicle_speed_mps * 3.6f, steering_telemetry.speed_valid);
+        steering_telemetry.limited_command *= steering_telemetry.limit_percent / 100.0f;
+    }
+    independent_steering_mix(&controller.drive_config.steering, steering_telemetry.limited_command,
                              steering_telemetry.ackermann_strength_percent, pulses, steering_telemetry.angle_deg);
     servo_output_set_pulses(pulses);
 }
@@ -161,12 +172,14 @@ void powertrain_steering_recenter(void)
     uint16_t centers[STEERING_SERVO_COUNT];
     independent_steering_mix(&controller.drive_config.steering, 0.0f, 0.0f, centers, steering_telemetry.angle_deg);
     steering_telemetry.command = 0.0f;
+    steering_telemetry.limited_command = 0.0f;
     servo_output_set_pulses(centers);
 }
 
 void powertrain_steering_init(void)
 {
     steering_telemetry = (steering_telemetry_t){0};
+    steering_telemetry.limit_percent = 100.0f;
     steering_input_valid = false;
     steering_input_filter_init(&steering_input_filter);
     steering_filtered_q16 = (int32_t)controller.steering_cal.center_us << 16;
@@ -184,6 +197,8 @@ void powertrain_steering_snapshot(powertrain_remote_snapshot_t *snapshot)
     snapshot->vehicle_speed_valid = steering_telemetry.speed_valid;
     snapshot->vehicle_speed_held = steering_telemetry.speed_held;
     snapshot->steering_command = steering_telemetry.command;
+    snapshot->steering_limited_command = steering_telemetry.limited_command;
+    snapshot->steering_limit_percent = steering_telemetry.limit_percent;
     snapshot->ackermann_strength_percent = steering_telemetry.ackermann_strength_percent;
     snapshot->steering_calibration = controller.steering_cal;
     for (size_t i = 0; i < STEERING_SERVO_COUNT; i++)

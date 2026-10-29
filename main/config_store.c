@@ -1,11 +1,13 @@
 #include "config_store.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include "calibration_validation.h"
 
 #include "default_config.h"
 #include "independent_steering.h"
+#include "steering_limit.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -21,7 +23,7 @@ esp_err_t config_store_init(void)
     return err;
 }
 
-void config_store_load_throttle(throttle_calibration_t *calibration)
+static void load_legacy_throttle(throttle_calibration_t *calibration, bool read_nvs)
 {
     *calibration = (throttle_calibration_t){
         .full_throttle_us = DEFAULT_RC_THROTTLE_FULL_US,
@@ -30,6 +32,7 @@ void config_store_load_throttle(throttle_calibration_t *calibration)
         .deadband_us = DEFAULT_RC_THROTTLE_DEADBAND_US,
     };
 
+    if (!read_nvs) return;
     nvs_handle_t nvs;
     if (nvs_open("cal", NVS_READONLY, &nvs) != ESP_OK) {
         return;
@@ -61,7 +64,7 @@ void config_store_load_throttle(throttle_calibration_t *calibration)
     }
 }
 
-esp_err_t config_store_save_throttle(const throttle_calibration_t *calibration)
+static esp_err_t save_legacy_throttle(const throttle_calibration_t *calibration)
 {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("cal", NVS_READWRITE, &nvs);
@@ -77,7 +80,7 @@ esp_err_t config_store_save_throttle(const throttle_calibration_t *calibration)
     return err;
 }
 
-void config_store_load_steering(steering_calibration_t *calibration)
+static void load_legacy_steering(steering_calibration_t *calibration, bool read_nvs)
 {
     *calibration = (steering_calibration_t){
         .left_us = DEFAULT_RC_STEERING_LEFT_US,
@@ -85,6 +88,7 @@ void config_store_load_steering(steering_calibration_t *calibration)
         .right_us = DEFAULT_RC_STEERING_RIGHT_US,
         .deadband_us = DEFAULT_RC_STEERING_DEADBAND_US,
     };
+    if (!read_nvs) return;
 
     nvs_handle_t nvs;
     if (nvs_open("cal", NVS_READONLY, &nvs) != ESP_OK) return;
@@ -104,7 +108,7 @@ void config_store_load_steering(steering_calibration_t *calibration)
     }
 }
 
-esp_err_t config_store_save_steering(const steering_calibration_t *calibration)
+static esp_err_t save_legacy_steering(const steering_calibration_t *calibration)
 {
     if (calibration == NULL || !calibration_steering_valid(calibration->left_us, calibration->center_us,
             calibration->right_us, calibration->deadband_us)) return ESP_ERR_INVALID_ARG;
@@ -120,13 +124,14 @@ esp_err_t config_store_save_steering(const steering_calibration_t *calibration)
     return err;
 }
 
-void config_store_load_arm(arm_calibration_t *calibration)
+static void load_legacy_arm(arm_calibration_t *calibration, bool read_nvs)
 {
     *calibration = (arm_calibration_t){
         .run_us = DEFAULT_RC_ARM_RUN_US,
         .stop_1_us = DEFAULT_RC_ARM_STOP_1_US,
         .stop_2_us = DEFAULT_RC_ARM_STOP_2_US,
     };
+    if (!read_nvs) return;
 
     nvs_handle_t nvs;
     if (nvs_open("cal", NVS_READONLY, &nvs) != ESP_OK) return;
@@ -143,7 +148,7 @@ void config_store_load_arm(arm_calibration_t *calibration)
     }
 }
 
-esp_err_t config_store_save_arm(const arm_calibration_t *calibration)
+static esp_err_t save_legacy_arm(const arm_calibration_t *calibration)
 {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("cal", NVS_READWRITE, &nvs);
@@ -156,7 +161,7 @@ esp_err_t config_store_save_arm(const arm_calibration_t *calibration)
     return err;
 }
 
-void config_store_load_drive(drive_config_t *config)
+static void load_legacy_drive(drive_config_t *config, bool read_nvs)
 {
     *config = (drive_config_t){
         .drivetrain_mode = DRIVETRAIN_AWD,
@@ -174,6 +179,8 @@ void config_store_load_drive(drive_config_t *config)
     };
 
     independent_steering_defaults(&config->steering);
+    steering_limit_defaults(&config->steering_limit);
+    if (!read_nvs) return;
 
     nvs_handle_t nvs;
     if (nvs_open("cfg", NVS_READONLY, &nvs) != ESP_OK) return;
@@ -217,6 +224,13 @@ void config_store_load_drive(drive_config_t *config)
     }
     if (nvs_get_u8(nvs, "arm_latch", &u8) == ESP_OK && u8 <= 1) {
         config->permanent_arm_latch_enabled = u8 != 0; found = true;
+    }
+    steering_limit_config_t limit = {0};
+    size_t limit_size = sizeof(limit);
+    if (nvs_get_blob(nvs, "steer_limit_v1", &limit, &limit_size) == ESP_OK &&
+        limit_size == sizeof(limit) && steering_limit_config_valid(&limit)) {
+        config->steering_limit = limit;
+        found = true;
     }
     independent_steering_config_t steering = {0};
     size_t steering_size = sizeof(steering);
@@ -299,11 +313,12 @@ void config_store_load_drive(drive_config_t *config)
     config->loaded_from_nvs = found;
 }
 
-esp_err_t config_store_save_drive(const drive_config_t *config)
+static esp_err_t save_legacy_drive(const drive_config_t *config)
 {
     if (config == NULL || config->drivetrain_mode < DRIVETRAIN_AWD ||
         config->drivetrain_mode > DRIVETRAIN_TANK || config->tank_limit_percent > 100 ||
-        !independent_steering_config_valid(&config->steering)) return ESP_ERR_INVALID_ARG;
+        !independent_steering_config_valid(&config->steering) ||
+        !steering_limit_config_valid(&config->steering_limit)) return ESP_ERR_INVALID_ARG;
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("cfg", NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
@@ -319,8 +334,161 @@ esp_err_t config_store_save_drive(const drive_config_t *config)
     if (err == ESP_OK) err = nvs_set_u16(nvs, "rpm_ppr", config->rpm_pulses_per_revolution);
     if (err == ESP_OK) err = nvs_set_u16(nvs, "st_smooth", config->steering_smoothing_ms);
     if (err == ESP_OK) err = nvs_set_blob(nvs, "dual_steer_v6", &config->steering, sizeof(config->steering));
+    if (err == ESP_OK) err = nvs_set_blob(nvs, "steer_limit_v1", &config->steering_limit, sizeof(config->steering_limit));
     if (err == ESP_OK) err = nvs_set_u8(nvs, "arm_latch", config->permanent_arm_latch_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
+}
+
+/* A complete imported profile is authoritative. A corrupt present profile uses
+ * uncalibrated defaults instead of combining stale legacy keys. */
+static int read_profile(configuration_bundle_t *bundle)
+{
+    nvs_handle_t nvs;
+    if (nvs_open("cfg", NVS_READONLY, &nvs) != ESP_OK) return 0;
+    uint8_t data[CONFIG_BACKUP_SIZE];
+    size_t size = sizeof(data);
+    esp_err_t err = nvs_get_blob(nvs, "profile_v1", data, &size);
+    nvs_close(nvs);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return 0;
+    return err == ESP_OK && config_backup_decode(data, size, bundle) ? 1 : -1;
+}
+
+static void load_legacy_bundle(configuration_bundle_t *bundle, bool read_nvs)
+{
+    load_legacy_throttle(&bundle->throttle, read_nvs);
+    load_legacy_steering(&bundle->input, read_nvs);
+    load_legacy_arm(&bundle->arm, read_nvs);
+    load_legacy_drive(&bundle->drive, read_nvs);
+}
+
+void config_store_load_bundle(configuration_bundle_t *bundle)
+{
+    int profile = read_profile(bundle);
+    if (profile != 1) load_legacy_bundle(bundle, profile == 0);
+}
+
+static esp_err_t erase_calibration_keys(const char *const *keys, size_t count)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open("cal", NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+    for (size_t i = 0; i < count && err == ESP_OK; i++) {
+        err = nvs_erase_key(nvs, keys[i]);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    }
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    return err;
+}
+
+static esp_err_t save_profile(const configuration_bundle_t *bundle, unsigned mirror)
+{
+    uint8_t data[CONFIG_BACKUP_SIZE];
+    if (!config_backup_encode(bundle, data, sizeof(data))) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open("cfg", NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(nvs, "profile_v1", data, sizeof(data));
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    if (err != ESP_OK) return err;
+
+    /* Preserve the legacy key formats after the complete record is durable.
+     * A failed mirror cannot invalidate the authoritative imported profile. */
+    const char *const throttle_keys[] = {"rx_throttle","rx_neutral","rx_reverse","rx_deadband"};
+    const char *const input_keys[] = {"st_left","st_center","st_right","st_dead"};
+    const char *const arm_keys[] = {"arm_run","arm_stop","arm_stop2"};
+    bool failed = false;
+    if (mirror & 1) failed |= (bundle->throttle.loaded_from_nvs ? save_legacy_throttle(&bundle->throttle)
+        : erase_calibration_keys(throttle_keys, 4)) != ESP_OK;
+    if (mirror & 2) failed |= (bundle->input.loaded_from_nvs ? save_legacy_steering(&bundle->input)
+        : erase_calibration_keys(input_keys, 4)) != ESP_OK;
+    if (mirror & 4) failed |= (bundle->arm.loaded_from_nvs ? save_legacy_arm(&bundle->arm)
+        : erase_calibration_keys(arm_keys, 3)) != ESP_OK;
+    if (mirror & 8) failed |= save_legacy_drive(&bundle->drive) != ESP_OK;
+    if (failed) printf("WARN: complete profile saved; legacy compatibility mirror incomplete\n");
+    return ESP_OK;
+}
+
+esp_err_t config_store_save_bundle(const configuration_bundle_t *bundle)
+{
+    return save_profile(bundle, 15);
+}
+
+void config_store_load_throttle(throttle_calibration_t *calibration)
+{
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 1) *calibration = bundle.throttle;
+    else load_legacy_throttle(calibration, profile == 0);
+}
+
+void config_store_load_steering(steering_calibration_t *calibration)
+{
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 1) *calibration = bundle.input;
+    else load_legacy_steering(calibration, profile == 0);
+}
+
+void config_store_load_arm(arm_calibration_t *calibration)
+{
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 1) *calibration = bundle.arm;
+    else load_legacy_arm(calibration, profile == 0);
+}
+
+void config_store_load_drive(drive_config_t *config)
+{
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 1) *config = bundle.drive;
+    else load_legacy_drive(config, profile == 0);
+}
+
+esp_err_t config_store_save_throttle(const throttle_calibration_t *calibration)
+{
+    if (calibration == NULL) return ESP_ERR_INVALID_ARG;
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 0) return save_legacy_throttle(calibration);
+    if (profile < 0) load_legacy_bundle(&bundle, false);
+    bundle.throttle = *calibration;
+    return save_profile(&bundle, 1);
+}
+
+esp_err_t config_store_save_steering(const steering_calibration_t *calibration)
+{
+    if (calibration == NULL) return ESP_ERR_INVALID_ARG;
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 0) return save_legacy_steering(calibration);
+    if (profile < 0) load_legacy_bundle(&bundle, false);
+    bundle.input = *calibration;
+    return save_profile(&bundle, 2);
+}
+
+esp_err_t config_store_save_arm(const arm_calibration_t *calibration)
+{
+    if (calibration == NULL) return ESP_ERR_INVALID_ARG;
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 0) return save_legacy_arm(calibration);
+    if (profile < 0) load_legacy_bundle(&bundle, false);
+    bundle.arm = *calibration;
+    return save_profile(&bundle, 4);
+}
+
+esp_err_t config_store_save_drive(const drive_config_t *config)
+{
+    if (config == NULL) return ESP_ERR_INVALID_ARG;
+    configuration_bundle_t bundle;
+    int profile = read_profile(&bundle);
+    if (profile == 0) return save_legacy_drive(config);
+    if (profile < 0) load_legacy_bundle(&bundle, false);
+    bundle.drive = *config;
+    return save_profile(&bundle, 8);
 }

@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.c"
         "cli.c"
         "config_store.c"
+        "config_backup.c"
         "cornering_control.c"
         "drivetrain_control.c"
         "esc_output.c"
@@ -18,6 +19,7 @@ idf_component_register(
         "servo_output.c"
         "independent_steering.c"
         "steering_input_filter.c"
+        "steering_limit.c"
         "wifi_control.c"
     PRIV_REQUIRES
         esp_driver_gpio

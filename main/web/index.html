@@ -57,8 +57,9 @@
           </tbody></table>
           <p id="steering-target-note" class="hint target-note">Angle targets include toe: + right; not measured.</p>
           <dl class="steering-readings">
-            <div><dt>Command (+ right)</dt><dd id="steering-command">--</dd></div>
+            <div><dt>Input → scaled (+ right)</dt><dd id="steering-command">--</dd></div>
             <div><dt>Ackermann strength</dt><dd id="ackermann-live">--</dd></div>
+            <div><dt>Steering range</dt><dd id="steering-limit-live">--</dd></div>
             <div><dt>Input filter</dt><dd id="steering-filter">--</dd></div>
           </dl>
         </section>
@@ -169,6 +170,17 @@
       </div>
       <div class="config-status"><span id="config-source">Source --</span><span id="config-lock" class="warning">Locked · no telemetry</span></div>
       <p id="message" class="message" role="status"></p>
+      <section class="panel backup-panel" aria-labelledby="backup-heading">
+        <div class="section-title"><h2 id="backup-heading">Configuration backup</h2></div>
+        <p class="hint">Transfer saved vehicle settings and receiver/wheel calibrations to another ESP32 running compatible firmware. Unsaved edits, arming state, firmware pin assignments and Wi-Fi credentials are excluded. Export and import require DISARMED with no calibration active.</p>
+        <div class="backup-actions">
+          <button id="backup-export" type="button" disabled>Export backup</button>
+          <label>Choose backup (.rcconfig)<input id="backup-file" type="file" accept=".rcconfig,application/octet-stream" disabled></label>
+          <button id="backup-import" class="danger" type="button" disabled>Import backup</button>
+        </div>
+        <p id="backup-preview" class="hint" role="status">Choose a backup to validate and preview it before import.</p>
+        <p id="backup-message" class="message" role="status"></p>
+      </section>
       <div class="settings-layout">
         <div class="settings-column">
           <section class="panel config-group" aria-labelledby="drive-settings-heading">
@@ -326,7 +338,7 @@
 
         <section class="panel config-group curve-group" aria-labelledby="curve-heading">
           <div class="section-title"><h2 id="curve-heading">Ackermann strength versus speed</h2></div>
-          <p class="hint curve-definition"><strong>0% = parallel · 100% = ideal Ackermann, before toe.</strong> Inside = wheel toward the turn; it follows steering input within linkage limits. Strength blends the outside angle toward the ideal geometry. Tank mode bypasses this curve.</p>
+          <p class="hint curve-definition"><strong>0% = parallel · 100% = ideal Ackermann, before toe.</strong> Inside = wheel toward the turn; it follows scaled steering input within linkage limits. Strength blends the outside angle toward the ideal geometry. Tank mode bypasses this curve.</p>
           <form data-builder="ackermann" id="ackermann-form">
             <div class="ackermann-layout">
               <div>
@@ -334,9 +346,25 @@
                 <div class="button-row"><button id="ackermann-add" type="button">Add point</button><button type="submit">Save curve</button></div>
                 <p class="hint curve-limits">2–8 points · start at 0 · increasing speeds<br>0–300 km/h · 0–100% · 0.1 precision</p>
               </div>
-              <div><svg id="ackermann-preview" viewBox="0 0 520 260" role="img" aria-label="Draft Ackermann strength against vehicle speed"></svg><p id="ackermann-preview-status" class="hint" role="status"></p></div>
+              <div><svg id="ackermann-preview" class="curve-preview" viewBox="0 0 520 260" role="img" aria-label="Draft Ackermann strength against vehicle speed"></svg><p id="ackermann-preview-status" class="hint curve-preview-status" role="status"></p></div>
             </div>
             <details class="technical-notes"><summary>Interpolation & speed loss</summary><p class="hint">Linear interpolation; final percentage holds above the last speed. Applies in reverse too. Armed RPM loss holds the last valid speed, including a stop with no pulses. Before a valid estimate, or when disarmed with missing RPM, the 0 km/h point applies.</p></details>
+          </form>
+        </section>
+
+        <section class="panel config-group curve-group" aria-labelledby="steering-limit-heading">
+          <div class="section-title"><h2 id="steering-limit-heading">Steering limit versus speed</h2></div>
+          <p class="hint curve-definition"><strong>100% = full configured steering · 0% = toe alignment only.</strong> Scales the entire steering input before Ackermann: at a 60% limit, full input requests 60% of the maximum angle and half input requests 30%. Servo calibration and toe stay fixed. Tank and wheel measurement bypass this curve.</p>
+          <form data-builder="steering-limit" id="steering-limit-form">
+            <div class="ackermann-layout">
+              <div>
+                <div class="table-scroll"><table class="ackermann-points"><thead><tr><th scope="col">Speed (km/h)</th><th scope="col">Steering (%)</th><th scope="col"><span class="sr-only">Remove point</span></th></tr></thead><tbody id="steering-limit-points"></tbody></table></div>
+                <div class="button-row"><button id="steering-limit-add" type="button">Add point</button><button type="submit">Save curve</button></div>
+                <p class="hint curve-limits">2–8 points · start at 0 · increasing speeds<br>0–300 km/h · 0–100% · 0.1 precision</p>
+              </div>
+              <div><svg id="steering-limit-preview" class="curve-preview" viewBox="0 0 520 260" role="img" aria-label="Draft steering limit against vehicle speed"></svg><p id="steering-limit-preview-status" class="hint curve-preview-status" role="status"></p></div>
+            </div>
+            <details class="technical-notes"><summary>Interpolation & speed loss</summary><p class="hint">Uses live mean rear-wheel speed, in forward and reverse. Linear interpolation; the final percentage holds above the last speed. Missing, invalid or stale rear RPM disables this limiter and immediately restores 100% steering range, even if Ackermann still uses a held speed. Valid speed readings resume the limiter. Defaults are 100% throughout; points are user settings, not measured grip limits.</p></details>
           </form>
         </section>
       </div>

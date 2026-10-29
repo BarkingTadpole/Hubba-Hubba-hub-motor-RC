@@ -376,6 +376,67 @@ The 500–2500 us servo range and shaft limits do not alter the separate
 Save failures preserve active RAM values. Receiver calibration and active
 legacy drive keys remain compatible; no NVS erase is needed.
 
+### Steering limit versus speed
+
+The independent steering-limit graph scales the complete normalized CH1 input
+before geometric Ackermann mixing. It is separate from Ackermann strength,
+measured wheel-angle calibration, neutral trims, toe and linkage travel limits.
+This is a user-defined input range, not the removed mechanical-table/lateral-g
+limiter or a measured tire-grip model. At each 20 ms steering update:
+
+```text
+range_percent = interpolate(steering_limit_points, live_rear_speed_kmh)
+limited_command = filtered_normalized_CH1 * range_percent / 100
+inside_request = abs(limited_command) * direction_specific_max_angle
+```
+
+The normal mixer then computes the outside angle, applies existing coupled
+travel constraints, adds toe and converts both wheel targets to calibrated PWM.
+At a 60% graph value, full CH1 requests 60% of the configured angle and half CH1
+requests 30%. It scales input rather than clipping everything above a threshold.
+The same percentage applies to left and right turns and to forward/reverse.
+100% preserves full input range; 0% holds the configured toe alignment. Endpoint
+PWM, measured wheel points, trims and toe are not rewritten. Tank and physical
+wheel measurement bypass the limiter.
+
+Use 2-8 points, first speed 0, strictly increasing speeds 0-300 km/h and steering
+percentages 0-100%, with one decimal place. Percentages may increase or decrease.
+Interpolate linearly between points and hold the final value above the last
+speed. Defaults are (0,100)/(100,100), preserving prior steering until a curve
+is explicitly saved. No percentages are supplied as validated handling limits.
+
+Per the user's requested policy, any unavailable, invalid or stale rear-speed
+estimate immediately disables this limiter and restores 100% range. Both rear
+RPM channels must meet the existing validity/finite/nonnegative requirements,
+with snapshot age at most 100 ms. A held estimate is not live: Ackermann can
+continue using held speed while this limiter is bypassed. Fresh valid readings
+resume limiting. These transitions can change output with CH1 held stationary.
+Rear wheel surface speed during slip is not independent ground-speed feedback.
+
+`config steering limit <speed_kmh:range_percent>...` saves the whole curve
+through the shared serial/HTTP parser and normal DISARMED/outside-calibration
+guards. Failed saves restore the previous RAM curve. RC Monitor Settings has a
+separate graph, add/remove point controls, validation, save and persistent drafts.
+Live shows input versus scaled command and the applied steering range, including
+100% speed-unavailable bypass, tank bypass and wheel-measurement bypass.
+
+The curve uses a separate 36-byte `cfg/steer_limit_v1` NVS blob: uint16 version
+1, uint16 point count and eight {uint16 speed_tenths_kmh, uint16
+limit_tenths_percent} pairs. Missing or invalid length/version/points use flat
+100% defaults. Existing 152-byte `dual_steer_v6` and its measured calibration
+remain unchanged, including legacy migrations. No new NVS work occurs in the
+drive loop. Protocol 3 adds `config.steering_limit_points` and steering
+`limited_command`/`limit_percent`; config/telemetry buffer limits are host tested.
+
+Validation added on 2026-10-29 covers interpolation, bounds, proportional input
+scaling, left/right targets, Ackermann preservation, guards/rollback, NVS
+round trips and measured-calibration preservation, stale/invalid RPM bypass and
+fresh-speed recovery. These are host/synthetic checks. No firmware is flashed by
+these checks. Verify the commanded PWM with traction disconnected, then follow
+the restrained low-power progression before evaluating any handling setting.
+The user's reported outside-front hopping near full lock above approximately
+40 km/h is an observation, not a validated speed threshold or a diagnosed cause.
+
 ## Rear speed estimate
 
 Motor speed equals wheel speed for these hub motors:
@@ -577,6 +638,79 @@ drive inputs and servo endpoints into compact rows; curve interpolation and
 speed-loss details are expandable. Calibration instructions, ESC warnings,
 confirmations and controller guards are retained. Calibration output states
 remain identified in Live instead of appearing as disarmed motor outputs.
+
+### Configuration backup and restore
+
+RC Monitor Settings > Configuration backup transfers the complete saved vehicle
+setup to another ESP32 running compatible firmware. Export reads saved NVS,
+including defaults for absent values and the original saved/uncalibrated flags;
+it does not export unsaved browser drafts or transient controller state.
+Both export and import require DISARMED and no calibration in progress.
+
+The `.rcconfig` file includes CH2 throttle endpoints/neutral/deadband, CH1 input
+endpoints/center/deadband, three-position CH4 calibration and all three saved
+flags; drivetrain, reverse/tank limits, drive smoothing, throttle failsafe,
+motor poles, RPM PPR, steering smoothing and arm-latch policy; both independent
+servo endpoint/angle calibrations, measured wheel points, trims, linkage/toe,
+geometry and Ackermann points; and the steering-limit curve. Arm-latch policy
+is a setting; the active arm latch and armed state are never restored. Firmware
+GPIO assignments, Wi-Fi credentials, live PWM/telemetry and retired keys are
+excluded. Match the receiver, wiring and mechanical setup before powered use.
+
+Export downloads `rc-car-configuration.rcconfig`. Selecting a file sends it for
+validation and previews drivetrain, saved receiver calibrations, measured wheel
+point counts and both curve counts. The user then confirms replacement of the
+complete saved setup. Servo alignment can change after import. Malformed,
+truncated, oversized, unsupported-version, checksum-failing or semantically
+invalid files are rejected without applying any fields. Normal live connection,
+DISARMED and calibration locks remain in force; the firmware rechecks guards
+when applying, independently of the preview or browser controls.
+
+The portable file is exactly 250 bytes, with an eight-byte `RCVCUCFG` magic,
+uint16 version 1, uint16 payload size 234 and uint32 CRC32 of the payload.
+All integers are little endian. The payload has a uint16 three-bit saved-calibration
+mask and eleven receiver-calibration uint16 values, eleven drive scalar uint16
+values, 76 words describing the v6 independent-steering fields and 18 words for
+the v1 steering-limit fields. Signed trim/toe/wheel-angle fields use 16-bit
+two's complement. No native bool, enum size, padding or pointers are serialized.
+Unused point slots are zero-filled. Numeric values and booleans are validated
+before narrowing to RAM fields; valid CRC alone is insufficient.
+
+Import first saves the entire checked file in one authoritative
+`cfg/profile_v1` blob. RAM applies only after that record save succeeds. Then
+compatibility mirrors update the existing `cal` and `cfg` keys without changing
+their types or the `dual_steer_v6`/`steer_limit_v1` formats. Unsaved receiver
+calibrations remove corresponding legacy keys instead of promoting defaults to
+calibrated data. A mirror failure is reported as a warning: the already-saved
+complete profile remains authoritative. Subsequent ordinary configuration or
+calibration saves preserve the rest of this profile and update the changed
+component plus its compatibility keys. Missing profile retains existing legacy
+loading/migrations. A present corrupt/invalid profile uses uncalibrated defaults
+and cannot silently combine old receiver calibration with new steering settings.
+Startup loads the complete bundle once. No blanket NVS/flash erasure is added.
+
+During import all ESC outputs stay safe. The controller retains DISARMED,
+clears the arm-cycle qualification and pending RUN timer, updates RPM PPR and
+resets steering median/smoothing/speed history before applying the new neutral
+and toe alignment. Physical CH4 STOP-to-RUN is required to arm afterward. The
+saved-calibration flags remain intact; importing an uncalibrated source does
+not bypass required receiver calibration.
+
+HTTP boundaries are GET `/api/config/backup`, POST `/api/config/preview` and
+POST `/api/config/import`, with `application/octet-stream` upload/download.
+Uploads have an exact 250-byte limit and bounded receive timeout retries. Preview
+does not write NVS or control outputs. These endpoints accept this schema only,
+not arbitrary NVS keys, terminal text, firmware images or remote arm commands.
+
+2026-10-29 native verification includes an independently packed Python/zlib
+golden file, every-byte corruption, truncated/oversized files, full calibration
+round trips, semantic rejection with valid recalculated CRC, commit failure,
+subsequent edits, corrupt-profile fallback, arming/calibration guards and actual
+HTTP handler upload bounds/timeouts. Chrome and WebKit tests cover file download,
+preview, malformed files, cancellation, rejection/retry, successful import,
+settings refresh and armed/calibration locks. These use synthetic inputs/NVS/HTTP,
+not hardware or physical flash/power-loss testing. The documented bench and
+power-loss validation requirements still apply. No ESP32 was flashed.
 
 ## Storage and verification
 

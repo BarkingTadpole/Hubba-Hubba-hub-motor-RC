@@ -1,5 +1,6 @@
 #include "remote_command.h"
 #include "independent_steering.h"
+#include "steering_limit.h"
 #include "calibration_validation.h"
 
 #include <ctype.h>
@@ -89,6 +90,29 @@ static bool parse_wheel_calibration(const char *text, remote_command_t *command)
         while (isspace((unsigned char)*text)) text++;
     }
     return cal->count >= 3;
+}
+
+static bool parse_steering_limit(const char *cursor, steering_limit_config_t *config)
+{
+    config->version = STEERING_LIMIT_VERSION;
+    while (*cursor != '\0') {
+        if (config->point_count >= STEERING_LIMIT_MAX_POINTS) return false;
+        char *end;
+        float speed = strtof(cursor, &end);
+        if (end == cursor || *end != ':' || !isfinite(speed) || speed < 0 || speed > 300) return false;
+        cursor = end + 1;
+        float percent = strtof(cursor, &end);
+        if (end == cursor || !isfinite(percent) || percent < 0 || percent > 100 ||
+            (*end != '\0' && !isspace((unsigned char)*end))) return false;
+        float speed10 = speed * 10.0f, percent10 = percent * 10.0f;
+        if (fabsf(speed10 - roundf(speed10)) > 0.001f ||
+            fabsf(percent10 - roundf(percent10)) > 0.001f) return false;
+        config->points[config->point_count++] = (steering_limit_point_t){
+            (uint16_t)lroundf(speed10), (uint16_t)lroundf(percent10)};
+        cursor = end;
+        while (isspace((unsigned char)*cursor)) cursor++;
+    }
+    return steering_limit_config_valid(config);
 }
 
 bool remote_command_parse(const char *line,
@@ -320,6 +344,14 @@ bool remote_command_parse(const char *line,
             return true;
         }
         set_error(error, error_size, "use config steering input <left_us> <center_us> <right_us> <deadband_us>; 800-2200, center bracketed >=150us, deadband 0-150 and less than each span");
+        return false;
+    }
+    if (strncmp(line, "config steering limit ", 22) == 0) {
+        if (parse_steering_limit(line + 22, &command->steering_limit)) {
+            command->operation = REMOTE_CONFIG_STEERING_LIMIT;
+            return true;
+        }
+        set_error(error, error_size, "use config steering limit <speed:percent>...; 2-8 points, first speed 0, ascending 0-300 km/h, steering range 0-100%, one decimal");
         return false;
     }
     if (strncmp(line, "config steering ackermann-strength ", 35) == 0) {

@@ -9,6 +9,7 @@ const {chromium, webkit} = require("playwright");
 const root = path.resolve(__dirname, "../..");
 const assets = path.join(root, "main/web");
 const baseline = require("./fixtures/monitor_state.json");
+const backupFixture = fs.readFileSync(path.join(__dirname, "fixtures/config_backup.rcconfig"));
 let telemetry, unavailable, rejectConfig, requests;
 function reset() {
   telemetry = structuredClone(baseline);
@@ -46,6 +47,22 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.url === "/api/config" && req.method === "GET") return json({ok: true, source: "nvs", config: telemetry.config,
     drive_mode: telemetry.drive_mode});
+  if (req.url === "/api/config/backup" && req.method === "GET") {
+    if (telemetry.armed || telemetry.calibration.active) return json({ok:false,message:"Disarm before exporting"},409);
+    res.writeHead(200,{"Content-Type":"application/octet-stream","Content-Disposition":"attachment; filename=rc-car-configuration.rcconfig"});
+    return res.end(backupFixture);
+  }
+  if (["/api/config/preview","/api/config/import"].includes(req.url) && req.method === "POST") {
+    const chunks=[]; for await (const chunk of req) chunks.push(chunk);
+    const body=Buffer.concat(chunks);requests.push({url:req.url,bytes:body.length});
+    if (!body.equals(backupFixture)) return json({ok:false,message:"Invalid, damaged or unsupported configuration backup; nothing changed"},400);
+    if (req.url.endsWith("/preview")) return json({ok:true,drive_mode:"AWD",throttle_calibrated:true,
+      steering_calibrated:true,arm_calibrated:true,left_wheel_points:3,right_wheel_points:5,ackermann_points:2,steering_limit_points:3});
+    if (rejectConfig || telemetry.armed || telemetry.calibration.active) return json({ok:false,message:"Import not applied"},409);
+    telemetry.drive_mode="AWD";telemetry.state="DISARMED";telemetry.initial_arm_cycle_ready=false;
+    telemetry.config.steering_limit_points=[{speed_kmh:0,percent:100},{speed_kmh:40,percent:65},{speed_kmh:80,percent:35}];
+    return json({ok:true,message:"Complete configuration saved. Physical CH4 STOP-to-RUN cycle required."});
+  }
   if (req.method === "POST") {
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -56,6 +73,10 @@ const server = http.createServer(async (req, res) => {
     if (req.url === "/api/config" && modeCommand) telemetry.drive_mode = modeCommand[1].toUpperCase();
     const tankCommand = command?.match(/^config tank limit (\d+)$/);
     if (req.url === "/api/config" && tankCommand) telemetry.config.tank_limit_percent = Number(tankCommand[1]);
+    const limitCommand = command?.match(/^config steering limit (.+)$/);
+    if (req.url === "/api/config" && limitCommand) telemetry.config.steering_limit_points = limitCommand[1].split(" ").map(p => {
+      const [speed_kmh, percent] = p.split(":").map(Number); return {speed_kmh, percent};
+    });
     const toeCommand = command?.match(/^config steering toe ([+-]?[\d.]+)$/);
     if (req.url === "/api/config" && toeCommand) telemetry.config.steering_toe_deg = Number(toeCommand[1]);
     const trimCommand = command?.match(/^config steering trim (left|right) (-?\d+)$/);
@@ -187,6 +208,8 @@ async function checkDesktop(browser, url, name, errors) {
       await page.locator('[data-view="settings"]').click();
       await page.locator("#ackermann-form").scrollIntoViewIfNeeded();
       await page.screenshot({path: path.join(dir, "monitor-ackermann.png"), animations: "disabled"});
+      await page.locator("#steering-limit-form").scrollIntoViewIfNeeded();
+      await page.screenshot({path: path.join(dir, "monitor-steering-limit.png"), animations: "disabled"});
       await page.setViewportSize({width: 1920, height: 1080});
       await page.locator('[data-view="live"]').click();
       await page.evaluate(() => window.scrollTo(0, 0));
@@ -286,6 +309,47 @@ async function run(engine, launchOptions, name) {
     const linkageDraft = page.locator('[data-builder="linkage"] [name="outside"]');
     const toeDraft = page.locator('[data-builder="toe"] input');
     const tankDraft = page.locator('[data-builder="tank-limit"] input');
+    // Transfer a real golden file; parser/NVS/controller validation also runs natively.
+    const beforeTransfer = structuredClone(telemetry);
+    const downloadPromise = page.waitForEvent("download");
+    await page.locator("#backup-export").click();
+    const download = await downloadPromise;
+    assert.equal(download.suggestedFilename(), "rc-car-configuration.rcconfig");
+    assert.deepEqual(fs.readFileSync(await download.path()), backupFixture);
+    const backupFile = page.locator("#backup-file");
+    await backupFile.setInputFiles({name:"invalid.rcconfig",mimeType:"application/octet-stream",buffer:Buffer.alloc(12)});
+    await page.waitForFunction(() => document.getElementById("backup-message").textContent.includes("Invalid"));
+    assert.equal(await page.locator("#backup-import").isDisabled(), true);
+    await backupFile.setInputFiles({name:"corrupt.rcconfig",mimeType:"application/octet-stream",buffer:Buffer.alloc(250)});
+    await page.waitForFunction(() => document.getElementById("backup-message").textContent.includes("damaged"));
+    assert.equal(await page.locator("#backup-import").isDisabled(), true);
+    await backupFile.setInputFiles(path.join(__dirname,"fixtures/config_backup.rcconfig"));
+    await enabled("backup-import");
+    assert.match(await page.locator("#backup-preview").textContent(), /left 3, right 5/);
+    if (process.env.MONITOR_SCREENSHOTS && name === "webkit") {
+      await page.locator(".backup-panel").scrollIntoViewIfNeeded();
+      await page.screenshot({path:path.join(process.env.MONITOR_SCREENSHOTS,"monitor-configuration-backup-phone.png"),animations:"disabled"});
+    }
+    const beforeCancelledImport = requests.length;
+    accept=false;await page.locator("#backup-import").click();accept=true;
+    assert.equal(requests.length,beforeCancelledImport);
+    telemetry.armed=true;telemetry.state="DRIVE_ARMED";
+    await page.waitForFunction(() => document.getElementById("backup-import").disabled);
+    assert.equal(await page.locator("#backup-export").isDisabled(),true);
+    telemetry.armed=false;telemetry.state="DISARMED";await enabled("backup-import");
+    telemetry.calibration.active=true;
+    await page.waitForFunction(() => document.getElementById("backup-import").disabled);
+    telemetry.calibration.active=false;await enabled("backup-import");
+    rejectConfig=true;
+    await page.locator("#backup-import").click();
+    await page.waitForFunction(() => document.getElementById("backup-message").textContent === "Import not applied");
+    assert.deepEqual(telemetry.config,beforeTransfer.config);
+    rejectConfig=false;await enabled("backup-import");
+    await page.locator("#backup-import").click();
+    await page.waitForFunction(() => document.getElementById("backup-message").textContent.includes("Complete configuration saved"));
+    await page.waitForFunction(() => document.querySelectorAll("#steering-limit-points tr").length === 3);
+    assert.equal(telemetry.initial_arm_cycle_ready,false);
+    telemetry=beforeTransfer;await reloadConfig();
     await draft.fill("12");
     await geometryDraft.fill("445.5");
     await inputDraft.fill("31");
@@ -353,6 +417,7 @@ async function run(engine, launchOptions, name) {
       geometry: "config steering geometry 445 320 107 30 30",
       "steering-input": "config steering input 2050 1518 987 30",
       ackermann: "config steering ackermann-strength 0:50 50:0",
+      "steering-limit": "config steering limit 0:100 100:100",
       ppr: "config rpm ppr 7", poles: "config rpm poles 14"
     };
     assert.equal(await page.locator("form[data-builder]").count(), Object.keys(commands).length);
@@ -528,6 +593,41 @@ async function run(engine, launchOptions, name) {
     await submit(page.locator('[data-builder="trim-left"] button'), "/api/config", "config steering trim left 900");
     await reloadConfig();
     assert.equal(await page.locator("#trim-left-neutral").textContent(), "Neutral preview: 2400 µs");
+    // Limiter editor has independent drafts, validation, save/reload and speed-loss indication.
+    const limitPercent = page.locator('#steering-limit-points [data-point="percent"]').nth(1);
+    await limitPercent.fill("60.5");
+    await page.waitForTimeout(400);
+    await navigate("live"); await navigate("settings");
+    assert.equal(await limitPercent.inputValue(), "60.5");
+    await page.locator("#steering-limit-add").click();
+    const limitSpeed = page.locator('#steering-limit-points [data-point="speed"]').nth(2);
+    const limitLast = page.locator('#steering-limit-points [data-point="percent"]').nth(2);
+    await limitSpeed.fill("90");
+    const beforeBadLimit = requests.length;
+    await page.locator('#steering-limit-form button[type="submit"]').click();
+    assert.equal(requests.length, beforeBadLimit);
+    await limitSpeed.fill("150");
+    await limitLast.fill("101");
+    await page.locator('#steering-limit-form button[type="submit"]').click();
+    assert.equal(requests.length, beforeBadLimit);
+    await limitLast.fill("25");
+    rejectConfig = true;
+    await page.locator('#steering-limit-form button[type="submit"]').click();
+    await page.locator("#message.error").waitFor();
+    assert.equal(telemetry.config.steering_limit_points[1].percent, 100);
+    assert.equal(await limitPercent.inputValue(), "60.5");
+    rejectConfig = false;
+    await submit(page.locator('#steering-limit-form button[type="submit"]'), "/api/config", "config steering limit 0:100 100:60.5 150:25");
+    await reloadConfig();
+    assert.equal(await limitPercent.inputValue(), "60.5");
+    assert.equal(await page.locator("#steering-limit-preview circle").count(), 3);
+    telemetry.steering.speed_valid = true; telemetry.steering.limit_percent = 60.5;
+    await navigate("live");
+    await page.waitForFunction(() => document.getElementById("steering-limit-live").textContent === "60.5%");
+    telemetry.steering.speed_valid = false; telemetry.steering.speed_held = true;
+    telemetry.steering.limit_percent = 100;
+    await page.waitForFunction(() => document.getElementById("steering-limit-live").textContent === "100% · no live speed");
+    await navigate("settings");
     const pointPercent = page.locator('#ackermann-points [data-point="percent"]').first();
     await pointPercent.fill("65.5");
     await page.waitForTimeout(600);
@@ -638,7 +738,7 @@ async function run(engine, launchOptions, name) {
     rejectConfig = true;
     await submit(page.locator("#wheel-cal-save"), "/api/config", wheelCommand);
     assert.equal(telemetry.config.servos[0].wheel_points.length, 0);
-    assert.match(await page.locator("#wheel-cal-message").textContent(), /Draft retained/);
+    await page.waitForFunction(() => document.getElementById("wheel-cal-message").textContent.includes("Draft retained"));
     rejectConfig = false;
     await submit(page.locator("#wheel-cal-save"), "/api/config", wheelCommand);
     await page.waitForFunction(() => document.getElementById("wheel-cal-status").textContent.includes("Left: 4 measured points saved"));
@@ -761,6 +861,8 @@ async function run(engine, launchOptions, name) {
       await page.screenshot({path: path.join(dir, "monitor-servo-trim-phone.png"), animations: "disabled"});
       await page.locator("#ackermann-form").scrollIntoViewIfNeeded();
       await page.screenshot({path: path.join(dir, "monitor-ackermann-phone.png"), animations: "disabled"});
+      await page.locator("#steering-limit-form").scrollIntoViewIfNeeded();
+      await page.screenshot({path: path.join(dir, "monitor-steering-limit-phone.png"), animations: "disabled"});
       telemetry.drive_mode = "TANK";
       telemetry.steering = {...telemetry.steering, left_us:1500, right_us:1500, left_angle_deg:0, right_angle_deg:0,
         command:0, speed_valid:false, speed_held:false, speed_kmh:0, ackermann_strength_percent:0};
@@ -769,7 +871,7 @@ async function run(engine, launchOptions, name) {
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({path: path.join(dir, "monitor-tank-live-phone.png"), animations: "disabled"});
     }
-    console.log(`${name}: desktop/touch layouts, navigation, 18 configuration forms, toe, tank mode/limit, linkage limits, servo range/directions, signed trims, strength curve, calibration commands, and disconnect/recovery passed`);
+    console.log(`${name}: desktop/touch layouts, configuration backup download/preview/cancel/import/locks, 19 forms, steering limiter, toe, tank, linkage, trims, Ackermann, calibration and disconnect/recovery passed`);
   } finally { await browser.close(); }
 }
 

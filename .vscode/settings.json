@@ -30,5 +30,5 @@
   ],
   "python-envs.defaultEnvManager": "ms-python.python:system",
   "idf.flashType": "UART",
-  "idf.port": "/dev/tty.usbserial-0001"
+  "idf.port": "COM3"
 }

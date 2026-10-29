@@ -15,8 +15,8 @@
 #define PIN_RC_ARM_INPUT GPIO_NUM_33
 
 /* Independent steering servo outputs. Receiver CH1 is routed through the ESP32. */
-#define PIN_STEERING_LEFT_OUTPUT GPIO_NUM_32
-#define PIN_STEERING_RIGHT_OUTPUT GPIO_NUM_26
+#define PIN_STEERING_LEFT_OUTPUT GPIO_NUM_23
+#define PIN_STEERING_RIGHT_OUTPUT GPIO_NUM_32
 
 /* Four independent ESC throttle outputs. */
 #define PIN_ESC_FL_THROTTLE GPIO_NUM_13

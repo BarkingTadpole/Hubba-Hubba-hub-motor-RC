@@ -23,6 +23,7 @@ typedef int portMUX_TYPE;
 ''',
     'driver/gpio.h': '''#pragma once
 typedef int gpio_num_t;
+#define GPIO_NUM_23 23
 #define GPIO_NUM_32 32
 #define GPIO_NUM_26 26
 ''',
@@ -50,6 +51,7 @@ SOURCE = r'''
 #include <stdio.h>
 #include "servo_output.h"
 #include "pwm_output.h"
+#include "pin_config.h"
 static ledc_timer_config_t timer;
 static ledc_channel_config_t channels[2];
 static uint32_t duty[2];
@@ -83,7 +85,7 @@ int main(void) {
     channel_error = 1; assert(servo_output_init(centers) == ESP_FAIL); channel_error = -1;
     assert(servo_output_init(centers) == ESP_OK);
     assert(timer.freq_hz == 50 && timer.duty_resolution == 16 && timer.speed_mode == LEDC_LOW_SPEED_MODE);
-    assert(channels[0].gpio_num == 32 && channels[1].gpio_num == 26);
+    assert(channels[0].gpio_num == PIN_STEERING_LEFT_OUTPUT && channels[1].gpio_num == PIN_STEERING_RIGHT_OUTPUT);
     for (int i = 0; i < 2; i++) assert(channels[i].speed_mode == LEDC_LOW_SPEED_MODE && channels[i].timer_sel == LEDC_TIMER_0);
     expect_pulses(1500,1500);
     servo_output_set_pulses(centers); assert(updates == 0);

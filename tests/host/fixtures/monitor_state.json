@@ -52,7 +52,9 @@
     "command": 0.0,
     "ackermann_strength_percent": 25.0,
     "left_angle_deg": 0,
-    "right_angle_deg": 0
+    "right_angle_deg": 0,
+    "limited_command": 0.0,
+    "limit_percent": 100
   },
   "rpm": {
     "ppr": 7,
@@ -156,6 +158,16 @@
     "steering_toe_range": {
       "min_deg": -30,
       "max_deg": 30
-    }
+    },
+    "steering_limit_points": [
+      {
+        "speed_kmh": 0,
+        "percent": 100
+      },
+      {
+        "speed_kmh": 100,
+        "percent": 100
+      }
+    ]
   }
 }

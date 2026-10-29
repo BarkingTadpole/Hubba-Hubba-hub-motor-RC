@@ -167,6 +167,12 @@ static void append_config(json_builder_t *json, const powertrain_remote_snapshot
                     c->steering.points[i].speed_tenths_kmh / 10.0,
                     c->steering.points[i].strength_tenths_percent / 10.0);
     }
+    json_append(json, "],\"steering_limit_points\":[");
+    for (uint16_t i = 0; i < c->steering_limit.point_count && i < STEERING_LIMIT_MAX_POINTS; i++) {
+        json_append(json, "%s{\"speed_kmh\":%.1f,\"percent\":%.1f}", i ? "," : "",
+                    c->steering_limit.points[i].speed_tenths_kmh / 10.0,
+                    c->steering_limit.points[i].limit_tenths_percent / 10.0);
+    }
     json_append(json, "]}");
 }
 
@@ -202,12 +208,14 @@ static int format_telemetry(char *buffer, size_t buffer_size)
     }
     json_append(&json, "},\"steering\":{\"left_us\":%u,\"right_us\":%u,\"filter_us\":%u,"
                 "\"filter_active\":%s,\"rejected_spikes\":%lu,\"speed_valid\":%s,\"speed_held\":%s,"
-                "\"speed_kmh\":%.3f,\"command\":%.4f,\"ackermann_strength_percent\":%.2f,\"left_angle_deg\":%.3f,\"right_angle_deg\":%.3f},"
+                "\"speed_kmh\":%.3f,\"command\":%.4f,\"limited_command\":%.4f,\"limit_percent\":%.2f,"
+                "\"ackermann_strength_percent\":%.2f,\"left_angle_deg\":%.3f,\"right_angle_deg\":%.3f},"
                 "\"rpm\":{\"ppr\":%u,\"wheels\":[",
                 snapshot.steering_servo_us[0], snapshot.steering_servo_us[1], snapshot.steering_filter_us,
                 bool_json(snapshot.steering_filter_active), (unsigned long)snapshot.steering_rejected_spikes,
                 bool_json(snapshot.vehicle_speed_valid), bool_json(snapshot.vehicle_speed_held),
                 finite_number(snapshot.vehicle_speed_mps * 3.6f), finite_number(snapshot.steering_command),
+                finite_number(snapshot.steering_limited_command), finite_number(snapshot.steering_limit_percent),
                 finite_number(snapshot.ackermann_strength_percent), finite_number(snapshot.steering_angle_deg[0]),
                 finite_number(snapshot.steering_angle_deg[1]), snapshot.rpm.pulses_per_revolution);
     for (size_t i = 0; i < REAR_RPM_COUNT; i++) {
@@ -451,6 +459,68 @@ static esp_err_t disarm_post_handler(httpd_req_t *request)
     return apply_http_command(request, "disarm config");
 }
 
+static esp_err_t backup_get_handler(httpd_req_t *request)
+{
+    uint8_t data[CONFIG_BACKUP_SIZE];
+    if (!powertrain_export_configuration(data, sizeof(data))) {
+        return send_json_message(request, "409 Conflict", false,
+            "Disarm and finish calibration before exporting saved configuration");
+    }
+    httpd_resp_set_type(request, "application/octet-stream");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Content-Disposition", "attachment; filename=rc-car-configuration.rcconfig");
+    return httpd_resp_send(request, (const char *)data, sizeof(data));
+}
+
+static bool receive_backup(httpd_req_t *request, uint8_t data[CONFIG_BACKUP_SIZE])
+{
+    if (request->content_len != CONFIG_BACKUP_SIZE) return false;
+    size_t received = 0;
+    unsigned timeouts = 0;
+    while (received < CONFIG_BACKUP_SIZE) {
+        int result = httpd_req_recv(request, (char *)data + received, CONFIG_BACKUP_SIZE - received);
+        if (result == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 2) continue;
+        if (result <= 0) return false;
+        received += (size_t)result;
+    }
+    return true;
+}
+
+static esp_err_t backup_preview_handler(httpd_req_t *request)
+{
+    uint8_t data[CONFIG_BACKUP_SIZE];
+    configuration_bundle_t bundle;
+    if (!receive_backup(request, data) || !config_backup_decode(data, sizeof(data), &bundle)) {
+        return send_json_message(request, "400 Bad Request", false,
+            "Invalid, damaged or unsupported configuration backup; nothing changed");
+    }
+    char response[448];
+    int length = snprintf(response, sizeof(response),
+        "{\"ok\":true,\"drive_mode\":\"%s\",\"throttle_calibrated\":%s,\"steering_calibrated\":%s,"
+        "\"arm_calibrated\":%s,\"left_wheel_points\":%u,\"right_wheel_points\":%u,"
+        "\"ackermann_points\":%u,\"steering_limit_points\":%u}",
+        drivetrain_mode_name(bundle.drive.drivetrain_mode), bool_json(bundle.throttle.loaded_from_nvs),
+        bool_json(bundle.input.loaded_from_nvs), bool_json(bundle.arm.loaded_from_nvs),
+        bundle.drive.steering.wheel_calibration[0].count, bundle.drive.steering.wheel_calibration[1].count,
+        bundle.drive.steering.point_count, bundle.drive.steering_limit.point_count);
+    if (length < 0 || (size_t)length >= sizeof(response)) return ESP_FAIL;
+    return send_json(request, "200 OK", response, length);
+}
+
+static esp_err_t backup_import_handler(httpd_req_t *request)
+{
+    uint8_t data[CONFIG_BACKUP_SIZE];
+    configuration_bundle_t bundle;
+    if (!receive_backup(request, data) || !config_backup_decode(data, sizeof(data), &bundle)) {
+        return send_json_message(request, "400 Bad Request", false,
+            "Invalid, damaged or unsupported configuration backup; nothing changed");
+    }
+    bool imported = powertrain_import_configuration(data, sizeof(data));
+    return send_json_message(request, imported ? "200 OK" : "409 Conflict", imported,
+        imported ? "Complete configuration saved. Physical CH4 STOP-to-RUN cycle required."
+                 : "Import not applied: stay DISARMED outside calibration and check NVS storage");
+}
+
 static esp_err_t register_http_handlers(httpd_handle_t server)
 {
     const httpd_uri_t handlers[] = {
@@ -464,6 +534,9 @@ static esp_err_t register_http_handlers(httpd_handle_t server)
         {.uri = "/api/config", .method = HTTP_POST, .handler = command_post_handler},
         {.uri = "/api/calibration", .method = HTTP_POST, .handler = command_post_handler},
         {.uri = "/api/disarm", .method = HTTP_POST, .handler = disarm_post_handler},
+        {.uri = "/api/config/backup", .method = HTTP_GET, .handler = backup_get_handler},
+        {.uri = "/api/config/preview", .method = HTTP_POST, .handler = backup_preview_handler},
+        {.uri = "/api/config/import", .method = HTTP_POST, .handler = backup_import_handler},
     };
     for (size_t index = 0; index < sizeof(handlers) / sizeof(handlers[0]); index++) {
         esp_err_t err = httpd_register_uri_handler(server, &handlers[index]);

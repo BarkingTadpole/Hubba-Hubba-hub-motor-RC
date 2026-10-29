@@ -10,12 +10,15 @@ const asArray = value => Array.isArray(value) ? value : [];
 let editingAllowed = false;
 let initialInputsLoaded = false;
 let ackDraftLoaded = false;
+let limitDraftLoaded = false;
 let calibrationRequestPending = false;
 let savedServos = [];
 let wheelSnapshot = null;
 const wheelDrafts = {left: null, right: null};
 let wheelLastCapture = null;
 let wheelRequestPending = false;
+let backupData = null;
+let backupBusy = false;
 
 // Switching views never reloads telemetry, form drafts, or an active workflow.
 const viewScroll = {};
@@ -137,8 +140,12 @@ function loadConfigInputs(t, force = false) {
   ["inside", "outside"].forEach(field => setFormValue("linkage", field, c.steering_linkage?.[`${field}_deg`]));
   ["left", "center", "right", "deadband"].forEach(field => setFormValue("steering-input", field, c.steering_input?.[`${field}_us`]));
   if (force || !ackDraftLoaded) {
-    setAckermannPoints(c.ackermann_strength_points || [{speed_kmh: 0, percent: 0}, {speed_kmh: 100, percent: 0}]);
+    setCurvePoints("ackermann", c.ackermann_strength_points);
     ackDraftLoaded = true;
+  }
+  if (force || !limitDraftLoaded) {
+    setCurvePoints("steering-limit", c.steering_limit_points);
+    limitDraftLoaded = true;
   }
   initialInputsLoaded = true;
   setText("config-source", c.loaded_from_nvs === true
@@ -304,6 +311,7 @@ function render(t = null, error = "Waiting for ESP32") {
     el("disarm-for-config").disabled = true;
     setText("config-lock", "Locked · no telemetry");
     el("config-lock").className = "warning";
+    updateBackupControls();
     return;
   }
   const steering = t.steering || {};
@@ -324,7 +332,10 @@ function render(t = null, error = "Waiting for ESP32") {
   setText("servo-right-us", `${steering.right_us ?? "--"} µs`);
   setText("servo-left-angle", fmt(steering.left_angle_deg, 1));
   setText("servo-right-angle", fmt(steering.right_angle_deg, 1));
-  setText("steering-command", `${fmt(Number(steering.command) * 100, 1)}%`);
+  setText("steering-command", `${fmt(Number(steering.command) * 100, 1)}% → ${fmt(Number(steering.limited_command) * 100, 1)}%`);
+  setText("steering-limit-live", tank ? "Bypassed · tank" : !steering.speed_valid
+    ? "100% · no live speed" : `${fmt(steering.limit_percent, 1)}%`);
+  el("steering-limit-live").className = !tank && !steering.speed_valid ? "warning" : "";
   setText("ackermann-live", tank ? "Bypassed · tank" : `${fmt(steering.ackermann_strength_percent, 1)}%`);
   setText("steering-target-note", tank ? "Tank: front wheels hold toe; CH1 selects spin." : "Angle targets include toe: + right; not measured.");
   if (t.config.servos.some(s => !s.wheel_points.length))
@@ -332,6 +343,8 @@ function render(t = null, error = "Waiting for ESP32") {
   if (["wheel-left", "wheel-right"].includes(t.calibration.kind) && t.calibration.active) {
     setText("servo-left-angle", "--"); setText("servo-right-angle", "--");
     setText("ackermann-live", "Bypassed · measuring");
+    setText("steering-limit-live", "Bypassed · measuring");
+    el("steering-limit-live").className = "";
     setText("steering-target-note", "Wheel measurement mode: CH1 positions the selected servo; enter measured angles in Calibrate.");
   }
   renderChannels(t.rc);
@@ -380,10 +393,75 @@ function render(t = null, error = "Waiting for ESP32") {
   if (!initialInputsLoaded) loadConfigInputs(t);
   updateCurveButtons();
   renderWheelCalibration(t);
+  updateBackupControls();
 }
 
-function readAckermannPoints() {
-  const points = [...el("ackermann-points").rows].map(row => ({
+function updateBackupControls() {
+  el("backup-export").disabled = !editingAllowed || backupBusy;
+  el("backup-file").disabled = !editingAllowed || backupBusy;
+  el("backup-import").disabled = !editingAllowed || backupBusy || !backupData;
+}
+
+function backupMessage(text, error = false) {
+  setText("backup-message", text);
+  el("backup-message").className = `message ${error ? "error" : "success"}`;
+}
+
+el("backup-export").addEventListener("click", async () => {
+  if (!editingAllowed || backupBusy) return;
+  backupBusy = true; updateBackupControls();
+  try {
+    const response = await fetch("/api/config/backup", {cache: "no-store"});
+    if (!response.ok) throw new Error((await response.json()).message || "Export rejected");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob), link = document.createElement("a");
+    link.href = url; link.download = "rc-car-configuration.rcconfig";
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    backupMessage("Saved configuration exported. Keep this file to restore your setup.");
+  } catch (error) { backupMessage(error.message, true); }
+  finally { backupBusy = false; updateBackupControls(); }
+});
+
+el("backup-file").addEventListener("change", async () => {
+  backupData = null;
+  const file = el("backup-file").files[0];
+  if (!file) { setText("backup-preview", "Choose a backup to validate and preview it before import."); updateBackupControls(); return; }
+  backupBusy = true; updateBackupControls();
+  setText("backup-preview", "Validating backup…");
+  try {
+    if (file.size !== 250) throw new Error("Invalid or unsupported configuration backup file.");
+    const data = await file.arrayBuffer();
+    const response = await fetch("/api/config/preview", {method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: data});
+    const preview = await response.json();
+    if (!response.ok || !preview.ok) throw new Error(preview.message || "Invalid backup");
+    backupData = data;
+    const receivers = [preview.throttle_calibrated && "CH2", preview.steering_calibrated && "CH1", preview.arm_calibrated && "CH4"].filter(Boolean);
+    setText("backup-preview", `${file.name}: ${preview.drive_mode}; receiver calibrations: ${receivers.join(", ") || "none saved"}; wheel measurements: left ${preview.left_wheel_points}, right ${preview.right_wheel_points}; Ackermann ${preview.ackermann_points} points; steering limit ${preview.steering_limit_points} points. Import replaces the complete saved vehicle setup.`);
+    backupMessage("Backup validated. Review the preview, then import when ready.");
+  } catch (error) {
+    setText("backup-preview", "Backup rejected; the current configuration is unchanged.");
+    backupMessage(error.message, true);
+  } finally { backupBusy = false; updateBackupControls(); }
+});
+
+el("backup-import").addEventListener("click", async () => {
+  if (!editingAllowed || backupBusy || !backupData) return;
+  if (!confirm("Replace all saved vehicle settings and receiver/wheel calibrations with this backup? Servo alignment may change. The car stays disarmed and will require a physical CH4 STOP-to-RUN cycle.")) return;
+  backupBusy = true; updateBackupControls();
+  try {
+    const response = await fetch("/api/config/import", {method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: backupData});
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.message || "Import rejected");
+    initialInputsLoaded = ackDraftLoaded = limitDraftLoaded = false;
+    wheelDrafts.left = wheelDrafts.right = null;
+    backupMessage(result.message);
+  } catch (error) { backupMessage(error.message, true); }
+  finally { backupBusy = false; updateBackupControls(); }
+});
+
+function readCurvePoints(id) {
+  const points = [...el(`${id}-points`).rows].map(row => ({
     speed_kmh: row.querySelector('[data-point="speed"]').valueAsNumber,
     percent: row.querySelector('[data-point="percent"]').valueAsNumber
   }));
@@ -391,7 +469,7 @@ function readAckermannPoints() {
   points.forEach((p, i) => {
     if (!Number.isFinite(p.speed_kmh) || !Number.isFinite(p.percent) || p.speed_kmh < 0 || p.speed_kmh > 300 || p.percent < 0 || p.percent > 100 ||
         Math.abs(p.speed_kmh * 10 - Math.round(p.speed_kmh * 10)) > 0.001 || Math.abs(p.percent * 10 - Math.round(p.percent * 10)) > 0.001) {
-      throw new Error("Use speeds 0–300 km/h and Ackermann strength 0–100%, with at most one decimal place.");
+      throw new Error("Use speeds 0–300 km/h and percentages 0–100%, with at most one decimal place.");
     }
     if ((i === 0 && p.speed_kmh !== 0) || (i > 0 && p.speed_kmh <= points[i - 1].speed_kmh)) {
       throw new Error("Start at 0 km/h and enter speeds in strictly increasing order.");
@@ -400,61 +478,63 @@ function readAckermannPoints() {
   return points;
 }
 
-function drawAckermannCurve() {
-  const svg = el("ackermann-preview");
+function drawCurve(id) {
+  const svg = el(`${id}-preview`);
   try {
-    const points = readAckermannPoints(), maxSpeed = Math.max(10, points.at(-1).speed_kmh);
+    const points = readCurvePoints(id), maxSpeed = Math.max(10, points.at(-1).speed_kmh);
     const x = speed => 60 + speed / maxSpeed * 440, y = percent => 210 - percent * 1.8;
     const grid = [0, 25, 50, 75, 100].map(p => `<line x1="60" y1="${y(p)}" x2="500" y2="${y(p)}" stroke="#d6dfda"/><text x="50" y="${y(p) + 4}" text-anchor="end">${p}%</text>`).join("");
     const ticks = [0, 0.25, 0.5, 0.75, 1].map(t => `<text x="${x(t * maxSpeed)}" y="230" text-anchor="middle">${fmt(t * maxSpeed, 1)}</text>`).join("");
-    svg.innerHTML = `<title>Draft Ackermann strength curve</title>${grid}${ticks}<text x="280" y="253" text-anchor="middle">Estimated vehicle speed (km/h)</text><polyline fill="none" stroke="#087759" stroke-width="3" points="${points.map(p => `${x(p.speed_kmh)},${y(p.percent)}`).join(" ")}"/>${points.map(p => `<circle cx="${x(p.speed_kmh)}" cy="${y(p.percent)}" r="5" fill="#087759"/>`).join("")}`;
-    setText("ackermann-preview-status", "Draft · save to apply");
+    svg.innerHTML = `<title>Draft ${id === "ackermann" ? "Ackermann strength" : "steering limit"} curve</title>${grid}${ticks}<text x="280" y="253" text-anchor="middle">Estimated vehicle speed (km/h)</text><polyline fill="none" stroke="#087759" stroke-width="3" points="${points.map(p => `${x(p.speed_kmh)},${y(p.percent)}`).join(" ")}"/>${points.map(p => `<circle cx="${x(p.speed_kmh)}" cy="${y(p.percent)}" r="5" fill="#087759"/>`).join("")}`;
+    setText(`${id}-preview-status`, "Draft · save to apply");
   } catch (error) {
     svg.innerHTML = "";
-    setText("ackermann-preview-status", error.message);
+    setText(`${id}-preview-status`, error.message);
   }
 }
 
-function addAckermannRow(point) {
-  const index = el("ackermann-points").rows.length;
+function addCurveRow(id, point) {
+  const index = el(`${id}-points`).rows.length;
   const row = document.createElement("tr");
-  for (const [field, value, min, max, label] of [["speed", point.speed_kmh, 0, 300, "Speed km/h"], ["percent", point.percent, 0, 100, "Ackermann strength percent"]]) {
+  for (const [field, value, min, max, label] of [["speed", point.speed_kmh, 0, 300, "Speed km/h"], ["percent", point.percent, 0, 100, id === "ackermann" ? "Ackermann strength percent" : "Steering range percent"]]) {
     const cell = row.insertCell(), input = document.createElement("input");
     input.type = "number"; input.min = min; input.max = max; input.step = "0.1"; input.required = true;
     input.dataset.point = field; input.value = Number.isFinite(Number(value)) ? Number(value) : 0;
     input.setAttribute("aria-label", `${label}, point ${index + 1}`);
     if (field === "speed" && index === 0) input.readOnly = true;
-    input.addEventListener("input", drawAckermannCurve); cell.append(input);
+    input.addEventListener("input", () => drawCurve(id)); cell.append(input);
   }
   const remove = document.createElement("button");
   remove.type = "button"; remove.textContent = "Remove"; remove.dataset.removePoint = "";
   remove.disabled = !editingAllowed;
   remove.addEventListener("click", () => {
-    if (!editingAllowed || row.rowIndex === 1 || el("ackermann-points").rows.length <= 2) return;
-    row.remove(); drawAckermannCurve(); updateCurveButtons();
+    if (!editingAllowed || row.rowIndex === 1 || el(`${id}-points`).rows.length <= 2) return;
+    row.remove(); drawCurve(id); updateCurveButtons();
   });
-  row.insertCell().append(remove); el("ackermann-points").append(row);
+  row.insertCell().append(remove); el(`${id}-points`).append(row);
 }
 
 function updateCurveButtons() {
-  const rows = [...el("ackermann-points").rows];
-  rows.forEach((row, i) => row.querySelector("button").disabled = !editingAllowed || i === 0 || rows.length <= 2);
-  el("ackermann-add").disabled = !editingAllowed || rows.length >= 8;
+  for (const id of ["ackermann", "steering-limit"]) {
+    const rows = [...el(`${id}-points`).rows];
+    rows.forEach((row, i) => row.querySelector("button").disabled = !editingAllowed || i === 0 || rows.length <= 2);
+    el(`${id}-add`).disabled = !editingAllowed || rows.length >= 8;
+  }
 }
 
-function setAckermannPoints(points) {
-  el("ackermann-points").replaceChildren();
-  points.slice(0, 8).forEach(addAckermannRow);
-  drawAckermannCurve(); updateCurveButtons();
+function setCurvePoints(id, points) {
+  el(`${id}-points`).replaceChildren();
+  points.slice(0, 8).forEach(point => addCurveRow(id, point));
+  drawCurve(id); updateCurveButtons();
 }
 
-el("ackermann-add").addEventListener("click", () => {
-  if (!editingAllowed || el("ackermann-points").rows.length >= 8) return;
-  const rows = [...el("ackermann-points").rows], last = rows.at(-1);
+for (const id of ["ackermann", "steering-limit"]) el(`${id}-add`).addEventListener("click", () => {
+  if (!editingAllowed || el(`${id}-points`).rows.length >= 8) return;
+  const rows = [...el(`${id}-points`).rows], last = rows.at(-1);
   const speed = last?.querySelector('[data-point="speed"]').valueAsNumber || 0;
   const percent = last?.querySelector('[data-point="percent"]').valueAsNumber || 0;
-  addAckermannRow({speed_kmh: Math.min(300, speed + 10), percent});
-  drawAckermannCurve(); updateCurveButtons();
+  addCurveRow(id, {speed_kmh: Math.min(300, speed + 10), percent});
+  drawCurve(id); updateCurveButtons();
 });
 
 const commandBuilders = {
@@ -473,7 +553,8 @@ const commandBuilders = {
   linkage: f => `config steering linkage ${f.inside.value} ${f.outside.value}`,
   geometry: f => `config steering geometry ${f.wheelbase.value} ${f.track.value} ${f.diameter.value} ${f.max_left.value} ${f.max_right.value}`,
   "steering-input": f => `config steering input ${f.left.value} ${f.center.value} ${f.right.value} ${f.deadband.value}`,
-  ackermann: () => `config steering ackermann-strength ${readAckermannPoints().map(p => `${p.speed_kmh}:${p.percent}`).join(" ")}`,
+  ackermann: () => `config steering ackermann-strength ${readCurvePoints("ackermann").map(p => `${p.speed_kmh}:${p.percent}`).join(" ")}`,
+  "steering-limit": () => `config steering limit ${readCurvePoints("steering-limit").map(p => `${p.speed_kmh}:${p.percent}`).join(" ")}`,
   smoothing: f => `config steering smoothing ${f.value.value}`,
   failsafe: f => `config failsafe ${f.pulse.value} ${f.window.value}`,
 };
@@ -490,6 +571,7 @@ async function sendCommand(command) {
     if (result.ok) {
       initialInputsLoaded = false;
       if (command.startsWith("config steering ackermann-strength ")) ackDraftLoaded = false;
+      if (command.startsWith("config steering limit ")) limitDraftLoaded = false;
     }
   } catch (error) {
     message.className = "message error";
@@ -616,7 +698,10 @@ async function poll() {
         !Array.isArray(payload.config.servos) || payload.config.servos.length !== 2 ||
         !payload.config.servos.every(s => Array.isArray(s.wheel_points)) ||
         !Number.isFinite(payload.calibration?.wheel_capture_sequence) ||
-        !Array.isArray(payload.config.ackermann_strength_points)) {
+        !Array.isArray(payload.config.ackermann_strength_points) ||
+        !Array.isArray(payload.config.steering_limit_points) ||
+        !Number.isFinite(payload.steering?.limit_percent) ||
+        !Number.isFinite(payload.steering?.limited_command)) {
       throw new Error("Unsupported telemetry response");
     }
     render(payload);

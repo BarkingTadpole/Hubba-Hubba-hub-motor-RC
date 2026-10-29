@@ -44,6 +44,9 @@ bool powertrain_apply_command(const remote_command_t *command)
         return powertrain_set_steering_input(&command->steering_input);
     case REMOTE_CONFIG_ACKERMANN:
         return powertrain_set_ackermann_curve(command->points, command->point_count);
+    case REMOTE_CONFIG_STEERING_LIMIT:
+        return powertrain_set_steering_limit_curve(command->steering_limit.points,
+                                                  command->steering_limit.point_count);
     case REMOTE_CONFIG_ARM_LATCH:
         return powertrain_set_permanent_arm_latch_enabled(command->enabled);
     case REMOTE_CALIBRATE_THROTTLE:

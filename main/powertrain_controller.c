@@ -803,10 +803,12 @@ esp_err_t powertrain_controller_init(void)
                  esp_err_to_name(err));
     }
 
-    config_store_load_throttle(&controller.throttle_cal);
-    config_store_load_steering(&controller.steering_cal);
-    config_store_load_arm(&controller.arm_cal);
-    config_store_load_drive(&controller.drive_config);
+    configuration_bundle_t bundle;
+    config_store_load_bundle(&bundle);
+    controller.throttle_cal = bundle.throttle;
+    controller.steering_cal = bundle.input;
+    controller.arm_cal = bundle.arm;
+    controller.drive_config = bundle.drive;
     powertrain_steering_init();
     uint16_t centers[STEERING_SERVO_COUNT];
     independent_steering_mix(&controller.drive_config.steering, 0.0f, 0.0f, centers, NULL);

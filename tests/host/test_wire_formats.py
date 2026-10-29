@@ -23,12 +23,17 @@ base = r'''
 #include "powertrain_controller.h"
 #include "independent_steering.h"
 #include "drivetrain_control.h"
+#include "steering_limit.h"
 #define ESP_LOGE(...) ((void)0)
 static powertrain_remote_snapshot_t sample;
 static bool powertrain_get_remote_snapshot_stub(powertrain_remote_snapshot_t *s) {*s=sample;return true;}
 #define powertrain_get_remote_snapshot powertrain_get_remote_snapshot_stub
 static void setup(void) {
     independent_steering_defaults(&sample.config.steering);
+    steering_limit_defaults(&sample.config.steering_limit);
+    sample.config.steering_limit.point_count=8;
+    for(int i=0;i<8;i++) sample.config.steering_limit.points[i]=(steering_limit_point_t){i*400,1000-i*100};
+    sample.steering_limit_percent=62.5f;sample.steering_limited_command=-.625f;
     sample.config.steering.trim_us[0]=450;sample.config.steering.trim_us[1]=-450;
     sample.config.steering.linkage=(steering_linkage_limits_t){900,655};
     sample.config.steering.toe_tenths_deg=-300;sample.config.tank_limit_percent=100;
@@ -84,7 +89,7 @@ with tempfile.TemporaryDirectory() as tmp:
     src=temp/'json.c';src.write_text(json_code);exe=temp/'json'
     subprocess.run([*shlex.split(os.environ.get('CC','cc')),'-std=c11','-Wall','-Wextra','-Werror','-I',str(temp),
                     '-I',str(ROOT/'main/include'),str(src),str(ROOT/'main/independent_steering.c'),
-                    str(ROOT/'main/drivetrain_control.c'),'-lm','-o',str(exe)],check=True)
+                    str(ROOT/'main/drivetrain_control.c'),str(ROOT/'main/steering_limit.c'),'-lm','-o',str(exe)],check=True)
     output=subprocess.check_output([str(exe)],text=True).splitlines()
     telemetry,config=map(json.loads,output)
     assert telemetry['protocol']==3 and telemetry['drive_mode']=='TANK'
@@ -95,6 +100,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert all(key not in telemetry for key in ['tv','imu','dragy','logging'])
     assert telemetry['steering']['left_us']==1800 and telemetry['steering']['right_us']==1300
     assert len(config['config']['ackermann_strength_points'])==8 and config['config']==telemetry['config']
+    assert len(config['config']['steering_limit_points'])==8
+    assert telemetry['steering']['limit_percent']==62.5 and telemetry['steering']['limited_command']==-.625
     assert config['config']['steering_geometry']['wheelbase_mm']==445
     assert config['config']['servos'][0]['left_angle_deg']==30
     assert all(len(s['wheel_points'])==9 for s in config['config']['servos'])

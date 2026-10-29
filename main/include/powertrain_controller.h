@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "powertrain_types.h"
 #include "remote_command.h"
+#include "config_backup.h"
 
 #define POWERTRAIN_CALIBRATION_PROMPT_MAX 112
 #define POWERTRAIN_CALIBRATION_MESSAGE_MAX 160
@@ -45,6 +46,8 @@ typedef struct {
     bool vehicle_speed_valid;
     bool vehicle_speed_held;
     float steering_command;
+    float steering_limited_command;
+    float steering_limit_percent;
     float ackermann_strength_percent;
     float steering_angle_deg[STEERING_SERVO_COUNT];
     steering_calibration_t steering_calibration;
@@ -80,6 +83,9 @@ bool powertrain_set_steering_toe(int16_t tenths_deg);
 bool powertrain_set_steering_geometry(const steering_geometry_t *geometry);
 bool powertrain_set_steering_input(const steering_calibration_t *calibration);
 bool powertrain_set_ackermann_curve(const ackermann_point_t *points, uint16_t count);
+bool powertrain_set_steering_limit_curve(const steering_limit_point_t *points, uint16_t count);
+bool powertrain_export_configuration(uint8_t *data, size_t size);
+bool powertrain_import_configuration(const uint8_t *data, size_t size);
 bool powertrain_set_permanent_arm_latch_enabled(bool enabled);
 
 void powertrain_calibrate_throttle(void);

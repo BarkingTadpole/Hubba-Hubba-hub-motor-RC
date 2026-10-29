@@ -28,6 +28,17 @@ static void expect_invalid(const char *line)
 
 static void test_drivetrain_and_scalar_commands(void)
 {
+    remote_command_t limit = parse_valid("config steering limit 0:100 40:60.5 80:0");
+    CHECK(limit.operation == REMOTE_CONFIG_STEERING_LIMIT && limit.steering_limit.point_count == 3);
+    CHECK(limit.steering_limit.points[1].limit_tenths_percent == 605);
+    const char *bad_limit[] = {"", "0:100", "1:100 40:60", "0:100 0:60", "0:100 301:60",
+        "0:100 40:101", "0:100 40:-1", "0:nan 40:60", "0:100 inf:60", "0:100 40:60 extra",
+        "0:100 40:60.01", "0:100 40.01:60", "0:100 1:90 2:80 3:70 4:60 5:50 6:40 7:30 8:20"};
+    for (unsigned i = 0; i < sizeof(bad_limit) / sizeof(bad_limit[0]); i++) {
+        char line[240];
+        strcpy(line, "config steering limit "); strcat(line, bad_limit[i]);
+        expect_invalid(line);
+    }
     remote_command_t wheel = parse_valid("config steering wheel left 25 28 2000:-25 1750:-10.5 1500:0 1000:28");
     CHECK(wheel.operation == REMOTE_CONFIG_WHEEL_CALIBRATION && wheel.unsigned_values[0] == STEERING_LEFT);
     CHECK(wheel.wheel_calibration.count == 4 && wheel.wheel_calibration.points[1].angle_tenths_deg == -105);

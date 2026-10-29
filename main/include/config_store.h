@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include "powertrain_types.h"
+#include "config_backup.h"
 
 esp_err_t config_store_init(void);
 
@@ -17,3 +18,5 @@ esp_err_t config_store_save_arm(const arm_calibration_t *calibration);
 
 void config_store_load_drive(drive_config_t *config);
 esp_err_t config_store_save_drive(const drive_config_t *config);
+void config_store_load_bundle(configuration_bundle_t *bundle);
+esp_err_t config_store_save_bundle(const configuration_bundle_t *bundle);

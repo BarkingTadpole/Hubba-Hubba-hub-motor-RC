@@ -78,7 +78,14 @@ void powertrain_print_status(void)
         ackermann_point_t point = snapshot.config.steering.points[i];
         printf(" %.1f:%+.1f", point.speed_tenths_kmh / 10.0, point.strength_tenths_percent / 10.0);
     }
-    printf("\n  filter=%s, rejected=%lu, rear RPM=%.1f%s/%.1f%s, PPR=%u\n",
+    printf("\n  steering range=%.1f%%, input=%+.3f, limited=%+.3f; curve (km/h:range):",
+           snapshot.steering_limit_percent, snapshot.steering_command, snapshot.steering_limited_command);
+    for (uint16_t i = 0; i < snapshot.config.steering_limit.point_count; i++) {
+        steering_limit_point_t point = snapshot.config.steering_limit.points[i];
+        printf(" %.1f:%.1f", point.speed_tenths_kmh / 10.0, point.limit_tenths_percent / 10.0);
+    }
+    printf("\n  steering limiter bypasses tank, wheel measurement and unavailable/held speed\n");
+    printf("  filter=%s, rejected=%lu, rear RPM=%.1f%s/%.1f%s, PPR=%u\n",
            snapshot.steering_filter_active ? "active" : "warmup", (unsigned long)snapshot.steering_rejected_spikes,
            (double)snapshot.rpm.rpm[0], snapshot.rpm.valid[0] ? "" : "?",
            (double)snapshot.rpm.rpm[1], snapshot.rpm.valid[1] ? "" : "?", snapshot.rpm.pulses_per_revolution);
@@ -220,4 +227,5 @@ void powertrain_print_help(void)
     printf("  config steering geometry <wheelbase_mm> <track_mm> <wheel_diameter_mm> <max_left_deg> <max_right_deg>\n");
     printf("  config steering ackermann-strength <km/h:strength> ... (2-8 points, first speed 0, strength 0-100%%)\n");
     printf("  config arm-latch <on|off>\n");
+    printf("  config steering limit <speed_kmh:range_percent>... (2-8 points, first speed 0; missing RPM disables limiter)\n");
 }

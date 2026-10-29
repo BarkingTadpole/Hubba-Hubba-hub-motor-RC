@@ -28,6 +28,7 @@ void nvs_close(nvs_handle_t);
 esp_err_t nvs_commit(nvs_handle_t);
 esp_err_t nvs_get_blob(nvs_handle_t,const char *,void *,size_t *);
 esp_err_t nvs_set_blob(nvs_handle_t,const char *,const void *,size_t);
+esp_err_t nvs_erase_key(nvs_handle_t,const char *);
 '''
     for kind in ['u8','u16']:
         typ={'u8':'uint8_t','u16':'uint16_t'}[kind]
@@ -42,7 +43,15 @@ esp_err_t nvs_set_blob(nvs_handle_t,const char *,const void *,size_t);
 #include "nvs.h"
 #include "config_store.h"
 #include "independent_steering.h"
+#include "steering_limit.h"
 static independent_steering_config_t stored,pending;
+static uint8_t profile_data[CONFIG_BACKUP_SIZE],pending_profile[CONFIG_BACKUP_SIZE];
+static bool profile_present,pending_profile_blob;
+static size_t profile_size=CONFIG_BACKUP_SIZE;
+static int commits_before_failure=-1;
+static steering_limit_config_t stored_limit,pending_limit;
+static bool limit_present,pending_limit_blob;
+static size_t limit_size=sizeof(stored_limit);
 static bool available,legacy,blob_present,v5_present,v4_present,v3_present,v2_present,old_present,commit_fail,pending_blob;
 static uint16_t v5_blob[38];
 static size_t v5_size = sizeof(v5_blob);
@@ -57,18 +66,23 @@ static size_t v2_size = sizeof(v2_blob);
 static uint16_t old_blob[24] = {1,2100,1520,1100,900,1480,1900,2,0,800,1000,600};
 static uint16_t cal_values[4] = {2050,1518,987,30}, pending_cal[4];
 static size_t stored_size;
-static unsigned erased,blob_writes;
+static unsigned erased,blob_writes,erased_keys;
 int nvs_flash_init(void){return ESP_OK;}
 int nvs_flash_erase(void){erased++;return ESP_OK;}
 int nvs_open(const char *name,int mode,int *handle){
     (void)name;(void)mode;*handle=1;pending_blob=false;pending=stored;
+    pending_limit_blob=false;pending_limit=stored_limit;
+    pending_profile_blob=false;
     pending_mode=stored_mode;pending_tank=stored_tank;
     memcpy(pending_cal,cal_values,sizeof(cal_values));return available?0:4;
 }
 void nvs_close(int handle){(void)handle;}
 int nvs_commit(int handle){
-    (void)handle;if(commit_fail)return 5;
+    (void)handle;if(commit_fail || commits_before_failure==0)return 5;
+    if(commits_before_failure>0)commits_before_failure--;
     if(pending_blob){stored=pending;stored_size=sizeof(stored);blob_present=true;}
+    if(pending_limit_blob){stored_limit=pending_limit;limit_size=sizeof(stored_limit);limit_present=true;}
+    if(pending_profile_blob){memcpy(profile_data,pending_profile,sizeof(profile_data));profile_present=true;profile_size=sizeof(profile_data);}
     stored_mode=pending_mode;stored_tank=pending_tank;
     memcpy(cal_values,pending_cal,sizeof(cal_values));return 0;
 }
@@ -88,7 +102,8 @@ int nvs_get_u16(int h,const char *key,uint16_t *v){
     int index=cal_index(key);if(index>=0){*v=cal_values[index];return 0;}
     const char *keys[]={"rx_throttle","rx_neutral","rx_reverse","rx_deadband","arm_run","arm_stop","arm_stop2","rpm_ppr"};
     uint16_t vals[]={978,1514,2044,80,983,2049,1515,7};
-    for(unsigned i=0;i<sizeof(vals)/sizeof(vals[0]);i++)if(!strcmp(key,keys[i])){*v=vals[i];return 0;}return 4;
+    for(unsigned i=0;i<sizeof(vals)/sizeof(vals[0]);i++)if(!strcmp(key,keys[i])){*v=vals[i];return 0;}
+    return 4;
 }
 int nvs_set_u8(int h,const char *k,uint8_t v){
     (void)h;
@@ -99,6 +114,16 @@ int nvs_set_u8(int h,const char *k,uint8_t v){
 int nvs_set_u16(int h,const char *k,uint16_t v){(void)h;int i=cal_index(k);if(i>=0)pending_cal[i]=v;return 0;}
 int nvs_get_blob(int h,const char *k,void *v,size_t *len){
     (void)h;
+    if(!strcmp(k,"profile_v1")){
+        if(!profile_present)return 4;
+        if(*len<profile_size)return 6;
+        memcpy(v,profile_data,profile_size);*len=profile_size;return 0;
+    }
+    if(!strcmp(k,"steer_limit_v1")){
+        if(!limit_present)return 4;
+        if(*len<limit_size)return 6;
+        memcpy(v,&stored_limit,limit_size);*len=limit_size;return 0;
+    }
     if(!strcmp(k,"dual_steer_v1")){
         if(!old_present)return 4;
         if(*len<sizeof(old_blob))return 6;
@@ -125,11 +150,19 @@ int nvs_get_blob(int h,const char *k,void *v,size_t *len){
         memcpy(v,v5_blob,v5_size);*len=v5_size;return 0;
     }
     assert(!strcmp(k,"dual_steer_v6"));if(!blob_present)return 4;
-    if(*len<stored_size)return 6;memcpy(v,&stored,stored_size);*len=stored_size;return 0;
+    if(*len<stored_size)return 6;
+    memcpy(v,&stored,stored_size);*len=stored_size;return 0;
 }
 int nvs_set_blob(int h,const char *k,const void *v,size_t len){
+    if(!strcmp(k,"profile_v1")){
+        assert(len==CONFIG_BACKUP_SIZE);memcpy(pending_profile,v,len);pending_profile_blob=true;return 0;
+    }
+    if(!strcmp(k,"steer_limit_v1")){
+        assert(len==36);memcpy(&pending_limit,v,len);pending_limit_blob=true;return 0;
+    }
     (void)h;assert(!strcmp(k,"dual_steer_v6"));assert(len==152 && len==sizeof(pending));memcpy(&pending,v,len);pending_blob=true;blob_writes++;return 0;
 }
+int nvs_erase_key(int h,const char *key){(void)h;(void)key;erased_keys++;return 0;}
 int main(void){
     drive_config_t config;config_store_load_drive(&config);
     assert(!config.loaded_from_nvs && independent_steering_config_valid(&config.steering));
@@ -292,11 +325,64 @@ int main(void){
     config.steering.wheel_calibration[0].count=0;
     assert(config_store_save_drive(&config)!=ESP_OK);config_store_load_drive(&config);
     assert(config.steering.wheel_calibration[0].count==5 && erased==0);
-    puts("NVS passed: read-only v1-v5 migration, v6 measured wheel curves/toe/trim/linkage, tank mode/limit, invalid blobs, failed commits, no erase.");
+    commit_fail=false;config_store_load_drive(&config);
+    assert(steering_limit_config_valid(&config.steering_limit));
+    assert(config.steering_limit.points[0].limit_tenths_percent==1000);
+    config.steering_limit.point_count=3;
+    config.steering_limit.points[1]=(steering_limit_point_t){400,625};
+    config.steering_limit.points[2]=(steering_limit_point_t){800,250};
+    independent_steering_config_t measured=config.steering;
+    assert(config_store_save_drive(&config)==ESP_OK);config_store_load_drive(&config);
+    assert(config.steering_limit.point_count==3 && config.steering_limit.points[1].limit_tenths_percent==625);
+    assert(memcmp(&measured,&config.steering,sizeof(measured))==0);
+    steering_limit_config_t valid_limit=stored_limit;
+    stored_limit.version=99;config_store_load_drive(&config);
+    assert(config.steering_limit.points[1].limit_tenths_percent==1000);
+    stored_limit=valid_limit;limit_size=sizeof(stored_limit)-1;config_store_load_drive(&config);
+    assert(config.steering_limit.point_count==2);
+    limit_size=sizeof(stored_limit);stored_limit.points[1].speed_tenths_kmh=0;config_store_load_drive(&config);
+    assert(config.steering_limit.point_count==2);
+    stored_limit=valid_limit;config_store_load_drive(&config);commit_fail=true;
+    config.steering_limit.points[1].limit_tenths_percent=100;
+    assert(config_store_save_drive(&config)!=ESP_OK);config_store_load_drive(&config);
+    assert(memcmp(&valid_limit,&config.steering_limit,sizeof(valid_limit))==0);
+    commit_fail=false;config.steering_limit.point_count=9;
+    assert(config_store_save_drive(&config)==ESP_ERR_INVALID_ARG);
+    configuration_bundle_t bundle;
+    config_store_load_bundle(&bundle);
+    bundle.throttle.loaded_from_nvs=bundle.input.loaded_from_nvs=bundle.arm.loaded_from_nvs=true;
+    bundle.drive.tank_limit_percent=43;
+    assert(config_store_save_bundle(&bundle)==ESP_OK);
+    configuration_bundle_t restored;config_store_load_bundle(&restored);
+    assert(restored.drive.tank_limit_percent==43 && restored.arm.loaded_from_nvs);
+    assert(restored.drive.steering.wheel_calibration[0].count==5);
+    uint8_t good_profile[CONFIG_BACKUP_SIZE];memcpy(good_profile,profile_data,sizeof(good_profile));
+    commit_fail=true;bundle.drive.tank_limit_percent=12;
+    assert(config_store_save_bundle(&bundle)!=ESP_OK);config_store_load_bundle(&restored);
+    assert(restored.drive.tank_limit_percent==43);commit_fail=false;
+    restored.drive.tank_limit_percent=22;assert(config_store_save_drive(&restored.drive)==ESP_OK);
+    config_store_load_bundle(&restored);assert(restored.drive.tank_limit_percent==22 && restored.arm.loaded_from_nvs);
+    restored.input.deadband_us=25;assert(config_store_save_steering(&restored.input)==ESP_OK);
+    config_store_load_bundle(&restored);assert(restored.input.deadband_us==25 && restored.drive.tank_limit_percent==22);
+    restored.drive.tank_limit_percent=44;commits_before_failure=1;
+    assert(config_store_save_bundle(&restored)==ESP_OK); // Complete record succeeds, mirrors fail.
+    commits_before_failure=-1;config_store_load_bundle(&restored);
+    assert(restored.drive.tank_limit_percent==44 && restored.input.deadband_us==25);
+    restored.throttle.loaded_from_nvs=false;restored.arm.loaded_from_nvs=false;
+    assert(config_store_save_bundle(&restored)==ESP_OK);config_store_load_bundle(&restored);
+    assert(!restored.throttle.loaded_from_nvs && !restored.arm.loaded_from_nvs && restored.input.loaded_from_nvs);
+    assert(erased_keys==7); // Unsaved calibration must not promote old legacy calibration keys.
+    profile_data[60]^=1;config_store_load_bundle(&restored);
+    assert(!restored.arm.loaded_from_nvs && !restored.throttle.loaded_from_nvs);
+    assert(restored.drive.tank_limit_percent==25); // Corrupt profile never mixes legacy values.
+    memcpy(profile_data,good_profile,sizeof(profile_data));
+    assert(erased==0);
+    puts("NVS passed: legacy migration, backup profile commit/rollback, subsequent edits, corruption fallback and calibration preservation.");
 }
 '''
     source=temp/'test.c';source.write_text(code);exe=temp/'test'
     subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-I',tmp,
                     '-I',str(ROOT/'main/include'),str(source),str(ROOT/'main/config_store.c'),
-                    str(ROOT/'main/independent_steering.c'),'-lm','-o',str(exe)],check=True)
+                    str(ROOT/'main/independent_steering.c'),str(ROOT/'main/steering_limit.c'),
+                    str(ROOT/'main/config_backup.c'),str(ROOT/'main/drivetrain_control.c'),'-lm','-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)

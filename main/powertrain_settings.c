@@ -6,8 +6,10 @@
 #include "config_store.h"
 #include "calibration_validation.h"
 #include "drivetrain_control.h"
+#include "esc_output.h"
 #include "independent_steering.h"
 #include "rpm_sensor.h"
+#include "steering_limit.h"
 
 static esp_err_t save_drive_config_or_report(const char *success_message)
 {
@@ -393,6 +395,26 @@ bool powertrain_set_ackermann_curve(const ackermann_point_t *points, uint16_t co
     return saved;
 }
 
+bool powertrain_set_steering_limit_curve(const steering_limit_point_t *points, uint16_t count)
+{
+    controller_lock();
+    steering_limit_config_t next = {.version = STEERING_LIMIT_VERSION, .point_count = count};
+    if (points != NULL && count <= STEERING_LIMIT_MAX_POINTS) {
+        memcpy(next.points, points, count * sizeof(*points));
+    }
+    if (!configuration_is_allowed() || points == NULL || !steering_limit_config_valid(&next)) {
+        printf("ERR: steering limit needs 2-8 ascending speed:percent points, first speed 0, speeds 0-300 km/h, range 0-100%%, while DISARMED\n");
+        controller_unlock();
+        return false;
+    }
+    steering_limit_config_t previous = controller.drive_config.steering_limit;
+    controller.drive_config.steering_limit = next;
+    bool saved = save_drive_config_or_report("OK: complete steering-limit curve saved") == ESP_OK;
+    if (!saved) controller.drive_config.steering_limit = previous;
+    controller_unlock();
+    return saved;
+}
+
 bool powertrain_set_permanent_arm_latch_enabled(bool enabled)
 {
     controller_lock();
@@ -413,4 +435,48 @@ bool powertrain_set_permanent_arm_latch_enabled(bool enabled)
     }
     controller_unlock();
     return saved;
+}
+
+bool powertrain_export_configuration(uint8_t *data, size_t size)
+{
+    controller_lock();
+    bool exported = false;
+    if (configuration_is_allowed()) {
+        configuration_bundle_t bundle;
+        config_store_load_bundle(&bundle);
+        exported = config_backup_encode(&bundle, data, size);
+    }
+    controller_unlock();
+    return exported;
+}
+
+bool powertrain_import_configuration(const uint8_t *data, size_t size)
+{
+    configuration_bundle_t bundle;
+    if (!config_backup_decode(data, size, &bundle)) return false;
+    controller_lock();
+    if (!configuration_is_allowed()) {
+        controller_unlock();
+        return false;
+    }
+    esc_output_set_safe();
+    esp_err_t err = config_store_save_bundle(&bundle);
+    if (err != ESP_OK) {
+        printf("ERR: configuration import was not saved: %s\n", esp_err_to_name(err));
+        controller_unlock();
+        return false;
+    }
+    controller.throttle_cal = bundle.throttle;
+    controller.steering_cal = bundle.input;
+    controller.arm_cal = bundle.arm;
+    controller.drive_config = bundle.drive;
+    controller.drive_config.loaded_from_nvs = true;
+    controller.arm_cycle_ready = false;
+    reset_drive_state();
+    if (controller.rpm_initialized) rpm_sensor_set_pulses_per_revolution(bundle.drive.rpm_pulses_per_revolution);
+    powertrain_steering_init();
+    powertrain_steering_recenter();
+    printf("OK: complete configuration imported; physical STOP-to-RUN cycle required\n");
+    controller_unlock();
+    return true;
 }

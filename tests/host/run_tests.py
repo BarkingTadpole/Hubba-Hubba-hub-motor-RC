@@ -12,7 +12,9 @@ tests={
     'cornering_control':['cornering_control'],
     'drivetrain_control':['drivetrain_control'],
     'steering_input_filter':['steering_input_filter'],
-    'remote_command':['remote_command','independent_steering'],
+    'steering_limit':['steering_limit'],
+    'config_backup':['config_backup','independent_steering','steering_limit','drivetrain_control'],
+    'remote_command':['remote_command','independent_steering','steering_limit'],
 }
 with tempfile.TemporaryDirectory() as tmp:
     for test,modules in tests.items():
@@ -22,5 +24,5 @@ with tempfile.TemporaryDirectory() as tmp:
                         str(ROOT/'tests/host'/f'test_{test}.c'),'-lm','-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)
         print(f'{test}: passed',flush=True)
-for test in ['controller','servo_output','config_store','wire_formats']:
+for test in ['controller','servo_output','config_store','wire_formats','backup_http']:
     subprocess.run([sys.executable,str(ROOT/'tests/host'/f'test_{test}.py')],check=True,cwd=ROOT)

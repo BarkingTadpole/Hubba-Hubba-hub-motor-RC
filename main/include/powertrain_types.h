@@ -13,6 +13,8 @@
 #define STEERING_LEFT 0
 #define STEERING_RIGHT 1
 #define ACKERMANN_MAX_POINTS 8
+#define STEERING_LIMIT_MAX_POINTS 8
+#define STEERING_LIMIT_VERSION 1
 #define WHEEL_CALIBRATION_MAX_POINTS 9
 #define INDEPENDENT_STEERING_VERSION 6
 
@@ -110,6 +112,18 @@ typedef struct {
 } ackermann_point_t;
 
 typedef struct {
+    uint16_t speed_tenths_kmh;
+    uint16_t limit_tenths_percent;
+} steering_limit_point_t;
+
+/* Separate blob preserves measured dual-steering calibration unchanged. */
+typedef struct {
+    uint16_t version;
+    uint16_t point_count;
+    steering_limit_point_t points[STEERING_LIMIT_MAX_POINTS];
+} steering_limit_config_t;
+
+typedef struct {
     uint16_t wheelbase_tenths_mm;
     uint16_t track_tenths_mm;
     uint16_t wheel_diameter_tenths_mm;
@@ -160,6 +174,7 @@ typedef struct {
     uint16_t rpm_pulses_per_revolution;
     uint16_t steering_smoothing_ms;
     independent_steering_config_t steering;
+    steering_limit_config_t steering_limit;
     bool permanent_arm_latch_enabled;
     bool loaded_from_nvs;
 } drive_config_t;
